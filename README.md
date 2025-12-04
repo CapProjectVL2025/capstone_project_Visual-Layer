@@ -10,7 +10,7 @@ pip install -r requirements.txt
 
 Edit config.py DATA_ROOT path if necessary
 
-3. Provide WANDB credentials:
+3. Provide WANDB credentials in .env file:
 export WANDB_API_KEY=your_key_here
 
 4. Run using:
