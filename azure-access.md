@@ -2,7 +2,7 @@
 
 Note: The following instructions are written with the assumption that you are using VS Code.
 
-1. Save the private key sent to you via email in your `.ssh` directory with a filename of your choice. DO NOT SHARE THIS WITH ANYONE.
+1. Save the private key sent to you via email in your `.ssh` directory with a filename of your choice OTHER than `id_rsa`. DO NOT SHARE THIS WITH ANYONE.
 
 2. Click on the "Open Remote Window" button in the bottom right corner. This will open a dialog at the top of your window.
 
