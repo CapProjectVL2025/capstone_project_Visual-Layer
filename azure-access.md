@@ -20,8 +20,17 @@ Host capstone
   IdentitiesOnly yes
 ```
 
-6. Click on the "Open Remote Window" button in the bottom right corner. This will open a dialog at the top of your window.
+6. Run the below:
+```
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/<name-of-key>
+chmod 600 ~/.ssh/config
+```
 
-7. Within the resultant dialog, click on "Connect to Host..." and then click on "capstone"
+Note: You may have to run `chmod 644 ~/.ssh/<name-of-pub-key>` after the second `chmod` command.
+
+7. Click on the "Open Remote Window" button in the bottom right corner. This will open a dialog at the top of your window.
+
+8. Within the resultant dialog, click on "Connect to Host..." and then click on "capstone"
 
 Aside from some following questions that you may have to answer, there you go! You are now connected to the Azure VM!
