@@ -107,6 +107,42 @@ def apply_point_flip(y_new: np.ndarray, i: int, new_label, changed_mask: np.ndar
     return True
 
 
+def inject_random_exact(X, y, noise_level, random_seed):
+    """
+    Exact budget random label flips:
+      - select random points
+      - assign each a random label (uniform) that is different from its current label
+    """
+    n = len(y)
+    target = target_num_changes(n, noise_level)
+    rng = np.random.RandomState(random_seed)
+
+    labels = np.unique(y)
+    if labels.size < 2:
+        raise ValueError("Need at least 2 classes for random label flips.")
+
+    indices = np.arange(n)
+    rng.shuffle(indices)
+
+    y_new = y.copy()
+    changed = np.zeros(n, dtype=bool)
+    log_rows = []
+
+    changes = 0
+    for i in indices:
+        if changes >= target:
+            break
+        cur = y_new[i]
+        pool = labels[labels != cur]
+        if pool.size == 0:
+            continue
+        new_label = rng.choice(pool)
+        if apply_point_flip(y_new, i, new_label, changed, log_rows, reason="random"):
+            changes += 1
+
+    return y_new, log_rows
+
+
 def inject_nn_exact(X, y, metric, noise_level, random_seed, nn_k):
     """
     Exact budget NN: select points (random order) and flip each to its nearest DIFFERENT-label neighbor.
@@ -135,6 +171,59 @@ def inject_nn_exact(X, y, metric, noise_level, random_seed, nn_k):
         new_label = choose_flip_label_from_neighbor(y_new, j)
         if apply_point_flip(y_new, i, new_label, changed, log_rows, reason="nn_diff"):
             changes += 1
+
+    return y_new, log_rows
+
+
+def inject_border_exact(X, y, metric, noise_level, random_seed, boundary_k, nn_k, boundary_top_frac):
+    """
+    Exact budget boundary nearest:
+      - compute boundary candidates by margin hardness (d_diff - d_same), smaller is more boundary-like
+      - restrict to top boundary_top_frac of candidates
+      - flip those points to their nearest DIFFERENT-label neighbor
+    """
+    n = len(y)
+    target = target_num_changes(n, noise_level)
+    rng = np.random.RandomState(random_seed)
+
+    order, _, _, _ = pick_boundary_candidates(X, y, metric=metric, boundary_k=boundary_k)
+    if len(order) == 0:
+        return inject_nn_exact(X, y, metric, noise_level, random_seed, nn_k)
+
+    top_n = max(1, int(np.floor(boundary_top_frac * len(order))))
+    boundary_pool = order[:top_n].copy()
+    rng.shuffle(boundary_pool)
+
+    _, neigh = build_knn(X, metric=metric, k=nn_k)
+    y_new = y.copy()
+    changed = np.zeros(n, dtype=bool)
+    log_rows = []
+
+    changes = 0
+    for i in boundary_pool:
+        if changes >= target:
+            break
+        j = nearest_diff_neighbor(neigh[i], y_new, i)
+        if j is None:
+            continue
+        new_label = choose_flip_label_from_neighbor(y_new, j)
+        if apply_point_flip(y_new, i, new_label, changed, log_rows, reason="border"):
+            changes += 1
+
+    if changes < target:
+        indices = np.arange(n)
+        rng.shuffle(indices)
+        for i in indices:
+            if changes >= target:
+                break
+            if changed[i]:
+                continue
+            j = nearest_diff_neighbor(neigh[i], y_new, i)
+            if j is None:
+                continue
+            new_label = choose_flip_label_from_neighbor(y_new, j)
+            if apply_point_flip(y_new, i, new_label, changed, log_rows, reason="border_fill_nn"):
+                changes += 1
 
     return y_new, log_rows
 
@@ -191,85 +280,6 @@ def inject_cluster_exact(X, y, metric, noise_level, random_seed, cluster_size, n
     return y_new, log_rows
 
 
-def inject_boundary_cluster_exact(X, y, metric, noise_level, random_seed, cluster_size, boundary_k, nn_k, boundary_top_frac):
-    """
-    Exact budget boundary cluster:
-      - compute boundary candidates by margin hardness (d_diff - d_same), smaller is more boundary-like
-      - restrict seeds to top boundary_top_frac of candidates (more concentrated boundary effect)
-      - pick seeds from that pool (random order)
-      - flip cluster_size local neighbors per seed, but stop exactly at target
-      - flips use nearest DIFFERENT-label neighbor labels
-    """
-    n = len(y)
-    target = target_num_changes(n, noise_level)
-    rng = np.random.RandomState(random_seed)
-
-    order, dists_b, neigh_b, scores = pick_boundary_candidates(X, y, metric=metric, boundary_k=boundary_k)
-    if len(order) == 0:
-        # fallback to random cluster if boundary detection fails
-        return inject_cluster_exact(X, y, metric, noise_level, random_seed, cluster_size, nn_k)
-
-    top_n = max(1, int(np.floor(boundary_top_frac * len(order))))
-    boundary_pool = order[:top_n].copy()
-    rng.shuffle(boundary_pool)
-
-    # KNN for cluster membership + diff-label target (may reuse boundary_k neighbors if large enough)
-    k_use = max(boundary_k, nn_k, cluster_size + 5)
-    dists, neigh = build_knn(X, metric=metric, k=k_use)
-
-    y_new = y.copy()
-    changed = np.zeros(n, dtype=bool)
-    log_rows = []
-
-    changes = 0
-    for seed in boundary_pool:
-        if changes >= target:
-            break
-        if changed[seed]:
-            continue
-
-        # cluster members around the seed
-        members = []
-        for j in neigh[seed]:
-            if len(members) >= cluster_size:
-                break
-            members.append(int(j))
-
-        for i in members:
-            if changes >= target:
-                break
-            if changed[i]:
-                continue
-            j = nearest_diff_neighbor(neigh[i], y_new, i)
-            if j is None:
-                continue
-            new_label = choose_flip_label_from_neighbor(y_new, j)
-            if apply_point_flip(
-                y_new, i, new_label, changed, log_rows,
-                reason=f"boundary_cluster_seed_{seed}"
-            ):
-                changes += 1
-
-    # If we failed to reach target (rare), fill remainder using NN flips
-    if changes < target:
-        remaining = target - changes
-        indices = np.arange(n)
-        rng.shuffle(indices)
-        for i in indices:
-            if changes >= target:
-                break
-            if changed[i]:
-                continue
-            j = nearest_diff_neighbor(neigh[i], y_new, i)
-            if j is None:
-                continue
-            new_label = choose_flip_label_from_neighbor(y_new, j)
-            if apply_point_flip(y_new, i, new_label, changed, log_rows, reason="boundary_fill_nn"):
-                changes += 1
-
-    return y_new, log_rows
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--embeddings", type=str, required=True)
@@ -281,7 +291,7 @@ def main():
     ap.add_argument("--log-file", type=str, required=True)
 
     ap.add_argument("--mode", type=str, required=True,
-                    choices=["nearest_neighbor", "cluster", "boundary_cluster"])
+                    choices=["random", "border", "cluster"])
     ap.add_argument("--noise-level", type=float, required=True)
 
     ap.add_argument("--metric", type=str, default="cosine")
@@ -307,21 +317,20 @@ def main():
         raise ValueError("boundary-top-frac must be in (0,1]")
 
     # Run selected injection
-    if args.mode == "nearest_neighbor":
-        y_new, log_rows = inject_nn_exact(
+    if args.mode == "random":
+        y_new, log_rows = inject_random_exact(
+            X, y, noise_level=args.noise_level, random_seed=args.random_seed
+        )
+    elif args.mode == "border":
+        y_new, log_rows = inject_border_exact(
             X, y, metric=args.metric, noise_level=args.noise_level,
-            random_seed=args.random_seed, nn_k=args.nn_k
+            random_seed=args.random_seed, boundary_k=args.boundary_k,
+            nn_k=args.nn_k, boundary_top_frac=args.boundary_top_frac
         )
     elif args.mode == "cluster":
         y_new, log_rows = inject_cluster_exact(
             X, y, metric=args.metric, noise_level=args.noise_level,
             random_seed=args.random_seed, cluster_size=args.cluster_size, nn_k=args.nn_k
-        )
-    elif args.mode == "boundary_cluster":
-        y_new, log_rows = inject_boundary_cluster_exact(
-            X, y, metric=args.metric, noise_level=args.noise_level,
-            random_seed=args.random_seed, cluster_size=args.cluster_size,
-            boundary_k=args.boundary_k, nn_k=args.nn_k, boundary_top_frac=args.boundary_top_frac
         )
     else:
         raise ValueError(f"Unsupported mode: {args.mode}")

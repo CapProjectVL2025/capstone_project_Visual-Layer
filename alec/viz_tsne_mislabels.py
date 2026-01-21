@@ -54,6 +54,25 @@ def load_inputs(embeddings_path: str, labels_path: str, label_col: str, max_up: 
     return X, df
 
 
+def load_noisy_labels(
+    noisy_path: str,
+    label_col: str,
+    df_clean: pd.DataFrame,
+    keep: np.ndarray,
+    max_up: int,
+):
+    path = resolve_input_path(noisy_path, Path.cwd(), max_up=max_up)
+    df_noisy = pd.read_csv(str(path))
+    if label_col not in df_noisy.columns:
+        raise ValueError(f"Missing label column '{label_col}' in noisy CSV: {path}")
+    if len(df_noisy) != len(df_clean):
+        raise ValueError(
+            f"Noisy labels rows={len(df_noisy)} does not match clean labels rows={len(df_clean)}: {path}"
+        )
+    y_noisy = df_noisy[label_col].values
+    return y_noisy[keep].astype(str), path
+
+
 def centroid_distance(a: np.ndarray, b: np.ndarray, metric: str) -> float:
     if metric == "cosine":
         denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-12
@@ -233,7 +252,20 @@ def compute_tsne_coords(X, seed=42, pca_dim=50, perplexity=30, n_iter=1500):
 
 def build_class_colors(class_pair: tuple[str, str]):
     palette = ["#e41a1c", "#377eb8"]
-    return {class_pair[0]: palette[0], class_pair[1]: palette[1]}
+    return {class_pair[0]: palette[0], class_pair[1]: palette[1], "Other": "#7f7f7f"}
+
+
+def map_labels_to_pair(labels: np.ndarray, class_pair: tuple[str, str]) -> tuple[np.ndarray, bool]:
+    labels = labels.astype(str)
+    mapped = []
+    has_other = False
+    for lab in labels:
+        if lab in class_pair:
+            mapped.append(lab)
+        else:
+            mapped.append("Other")
+            has_other = True
+    return np.array(mapped, dtype=object), has_other
 
 
 def build_knn(X: np.ndarray, metric: str, k: int):
@@ -360,7 +392,7 @@ def safe_name(s: str) -> str:
 def plot_pair(
     Z,
     labels,
-    class_pair,
+    class_order,
     class_colors,
     title,
     ax,
@@ -384,7 +416,7 @@ def plot_pair(
     handles = [
         Line2D([0], [0], marker="o", linestyle="None", markersize=6,
                markerfacecolor=class_colors[c], markeredgecolor="none", label=c)
-        for c in class_pair
+        for c in class_order
     ]
     if changed_mask is not None and changed_mask.any():
         handles.append(
@@ -417,12 +449,9 @@ def main():
     ap.add_argument("--max-per-class", type=int, default=0)
     ap.add_argument("--sample", type=str, choices=["first", "random"], default="random")
 
-    ap.add_argument("--noise-level", type=float, default=0.10)
-    ap.add_argument("--mode", type=str, default="nearest_neighbor",
-                    choices=["nearest_neighbor", "boundary_nearest"])
-    ap.add_argument("--nn-k", type=int, default=50)
-    ap.add_argument("--boundary-k", type=int, default=25)
-    ap.add_argument("--metric", type=str, default="cosine")
+    ap.add_argument("--noisy-random", type=str, default="")
+    ap.add_argument("--noisy-border", type=str, default="")
+    ap.add_argument("--noisy-cluster", type=str, default="")
 
     ap.add_argument("--pca-dim", type=int, default=50)
     ap.add_argument("--perplexity", type=int, default=30)
@@ -458,60 +487,78 @@ def main():
         perplexity=args.perplexity, n_iter=args.n_iter
     )
 
-    if args.mode == "nearest_neighbor":
-        y_noisy, changed_mask = inject_nn_exact(
-            Xs, y_clean.copy(), metric=args.metric, noise_level=args.noise_level,
-            random_seed=args.seed, nn_k=args.nn_k
-        )
-    elif args.mode == "boundary_nearest":
-        y_noisy, changed_mask = inject_boundary_nearest(
-            Xs, y_clean.copy(), metric=args.metric, noise_level=args.noise_level,
-            random_seed=args.seed, boundary_k=args.boundary_k, nn_k=args.nn_k
-        )
-    else:
-        raise ValueError(f"Unsupported mode: {args.mode}")
-
     class_colors = build_class_colors(class_pair)
+    y_clean_mapped, _ = map_labels_to_pair(y_clean, class_pair)
 
-    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
-    plot_pair(
-        Z, y_clean, class_pair, class_colors,
-        "t-SNE (Clean Labels)", axes[0],
-        point_size=args.point_size, point_alpha=args.point_alpha
-    )
-    plot_pair(
-        Z, y_noisy, class_pair, class_colors,
-        f"t-SNE (NN Noise {args.noise_level:.2f})", axes[1],
-        point_size=args.point_size, point_alpha=args.point_alpha,
-        changed_mask=changed_mask
-    )
+    noise_inputs = {
+        "random": args.noisy_random,
+        "border": args.noisy_border,
+        "cluster": args.noisy_cluster,
+    }
+    noise_inputs = {k: v for k, v in noise_inputs.items() if v}
+    if not noise_inputs:
+        raise ValueError("Provide at least one of --noisy-random/--noisy-border/--noisy-cluster.")
 
     xmin, xmax = float(Z[:, 0].min()), float(Z[:, 0].max())
     ymin, ymax = float(Z[:, 1].min()), float(Z[:, 1].max())
-    for ax in axes:
-        ax.set_xlim(xmin, xmax)
-        ax.set_ylim(ymin, ymax)
 
-    title = f"Similar class pair: {class_pair[0]} vs {class_pair[1]}"
-    if pair_dist is not None:
-        title += f" (centroid dist={pair_dist:.4f})"
-    fig.suptitle(title)
-
-    fig.tight_layout()
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    if args.out_name:
-        out_name = args.out_name
-    else:
-        out_name = f"tsne_nn_pair_{safe_name(class_pair[0])}_{safe_name(class_pair[1])}.png"
-    out_path = out_dir / out_name
-    fig.savefig(str(out_path), dpi=200)
-    plt.close(fig)
+
+    for noise_type, noisy_path in noise_inputs.items():
+        y_noisy, resolved_path = load_noisy_labels(
+            noisy_path, args.label_col, df_clean, keep, max_up=args.max_up
+        )
+        changed_mask = y_noisy != y_clean
+        changed_pct = 100.0 * (changed_mask.sum() / max(1, len(changed_mask)))
+
+        y_noisy_mapped, has_other = map_labels_to_pair(y_noisy, class_pair)
+        class_order = list(class_pair)
+        if has_other:
+            class_order.append("Other")
+
+        fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+        plot_pair(
+            Z, y_clean_mapped, class_order[:2], class_colors,
+            "t-SNE (Clean Labels)", axes[0],
+            point_size=args.point_size, point_alpha=args.point_alpha
+        )
+        plot_pair(
+            Z, y_noisy_mapped, class_order, class_colors,
+            f"t-SNE (Corrupted Labels)", axes[1],
+            point_size=args.point_size, point_alpha=args.point_alpha,
+            changed_mask=changed_mask
+        )
+
+        for ax in axes:
+            ax.set_xlim(xmin, xmax)
+            ax.set_ylim(ymin, ymax)
+
+        title = f"Noise: {noise_type} | changed={changed_pct:.1f}% | {class_pair[0]} vs {class_pair[1]}"
+        if pair_dist is not None:
+            title += f" (centroid dist={pair_dist:.4f})"
+        fig.suptitle(title)
+
+        fig.tight_layout()
+        if args.out_name:
+            base = Path(args.out_name)
+            if base.suffix:
+                out_name = f"{base.stem}_{noise_type}{base.suffix}"
+            else:
+                out_name = f"{base.name}_{noise_type}.png"
+        else:
+            out_name = f"tsne_{noise_type}_{safe_name(class_pair[0])}_{safe_name(class_pair[1])}.png"
+        out_path = out_dir / out_name
+        fig.savefig(str(out_path), dpi=200)
+        plt.close(fig)
+
+        print(f"[viz] noise={noise_type} path={resolved_path}")
+        print(f"[viz] changed={changed_mask.sum()} ({changed_pct:.1f}%)")
+        print(f"[viz] wrote: {out_path}")
 
     print(f"[viz] selected classes: {class_pair[0]}, {class_pair[1]}")
     if pair_dist is not None:
         print(f"[viz] centroid distance ({args.class_metric}): {pair_dist:.4f}")
-    print(f"[viz] wrote: {out_path}")
 
 
 if __name__ == "__main__":

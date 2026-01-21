@@ -13,9 +13,9 @@ $PYTHON_BIN "$NOISE_SCRIPT" \
   --labels alec/labels_clean.csv \
   --id-column vector_id \
   --label-column label \
-  --output-labels alec/labels_nn_10.csv \
-  --log-file alec/log_nn_10.csv \
-  --mode nearest_neighbor \
+  --output-labels alec/labels_random_10.csv \
+  --log-file alec/log_random_10.csv \
+  --mode random \
   --noise-level 0.10 \
   --cluster-size 1 \
   --metric cosine \
@@ -39,12 +39,12 @@ $PYTHON_BIN "$NOISE_SCRIPT" \
   --labels alec/labels_clean.csv \
   --id-column vector_id \
   --label-column label \
-  --output-labels alec/labels_boundary_cluster_k5_10.csv \
-  --log-file alec/log_boundary_cluster_k5_10.csv \
-  --mode boundary_cluster \
+  --output-labels alec/labels_border_10.csv \
+  --log-file alec/log_border_10.csv \
+  --mode border \
   --noise-level 0.10 \
-  --cluster-size 5 \
   --boundary-k 10 \
+  --boundary-top-frac 0.25 \
   --metric cosine \
   --random-seed 42
 
