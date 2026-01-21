@@ -103,8 +103,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--metadata-csv", type=str, default="metadata/embeddings.csv")
     ap.add_argument("--embeddings-dir", type=str, default="embeddings")
-    ap.add_argument("--out-npy", type=str, default="embeddings.npy")
-    ap.add_argument("--out-labels", type=str, default="labels_clean.csv")
+    ap.add_argument("--out-npy", type=str, default="alec/embeddings.npy")
+    ap.add_argument("--out-labels", type=str, default="alec/labels_clean.csv")
     ap.add_argument("--max-rows", type=int, default=10000, help="Cap rows for TSNE friendliness")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--id-col", type=str, default="", help="Optional override")
@@ -182,7 +182,9 @@ def main():
         embs.append(e)
 
     X = np.vstack(embs).astype(np.float32)  # [N, D]
-    np.save(args.out_npy, X)
+    out_npy = Path(args.out_npy)
+    out_npy.parent.mkdir(parents=True, exist_ok=True)
+    np.save(str(out_npy), X)
 
     out = pd.DataFrame()
     if id_col is not None and id_col in df.columns:
@@ -197,13 +199,15 @@ def main():
         if extra in df.columns:
             out[extra] = df[extra].values
 
-    out.to_csv(args.out_labels, index=False)
+    out_labels = Path(args.out_labels)
+    out_labels.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(str(out_labels), index=False)
 
     print("Export complete")
     print(f"  metadata_csv: {meta_path}")
     print(f"  embeddings_dir: {emb_dir if emb_dir is not None else '(inferred via metadata parent)'}")
-    print(f"  embeddings.npy: {args.out_npy}  shape={X.shape}")
-    print(f"  labels_clean.csv: {args.out_labels} rows={len(out)}")
+    print(f"  embeddings.npy: {out_npy}  shape={X.shape}")
+    print(f"  labels_clean.csv: {out_labels} rows={len(out)}")
     print(f"  columns used: id={id_col}, path={path_col}, label={label_col}")
 
 

@@ -9,12 +9,12 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 NOISE_SCRIPT="$ROOT_DIR/alec/noise_injection.py"
 
 $PYTHON_BIN "$NOISE_SCRIPT" \
-  --embeddings embeddings.npy \
-  --labels labels_clean.csv \
+  --embeddings alec/embeddings.npy \
+  --labels alec/labels_clean.csv \
   --id-column vector_id \
   --label-column label \
-  --output-labels labels_nn_10.csv \
-  --log-file log_nn_10.csv \
+  --output-labels alec/labels_nn_10.csv \
+  --log-file alec/log_nn_10.csv \
   --mode nearest_neighbor \
   --noise-level 0.10 \
   --cluster-size 1 \
@@ -22,12 +22,12 @@ $PYTHON_BIN "$NOISE_SCRIPT" \
   --random-seed 42
 
 $PYTHON_BIN "$NOISE_SCRIPT" \
-  --embeddings embeddings.npy \
-  --labels labels_clean.csv \
+  --embeddings alec/embeddings.npy \
+  --labels alec/labels_clean.csv \
   --id-column vector_id \
   --label-column label \
-  --output-labels labels_cluster_k5_10.csv \
-  --log-file log_cluster_k5_10.csv \
+  --output-labels alec/labels_cluster_k5_10.csv \
+  --log-file alec/log_cluster_k5_10.csv \
   --mode cluster \
   --noise-level 0.10 \
   --cluster-size 5 \
@@ -35,12 +35,12 @@ $PYTHON_BIN "$NOISE_SCRIPT" \
   --random-seed 42
 
 $PYTHON_BIN "$NOISE_SCRIPT" \
-  --embeddings embeddings.npy \
-  --labels labels_clean.csv \
+  --embeddings alec/embeddings.npy \
+  --labels alec/labels_clean.csv \
   --id-column vector_id \
   --label-column label \
-  --output-labels labels_boundary_cluster_k5_10.csv \
-  --log-file log_boundary_cluster_k5_10.csv \
+  --output-labels alec/labels_boundary_cluster_k5_10.csv \
+  --log-file alec/log_boundary_cluster_k5_10.csv \
   --mode boundary_cluster \
   --noise-level 0.10 \
   --cluster-size 5 \
