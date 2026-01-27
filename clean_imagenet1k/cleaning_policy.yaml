@@ -1,0 +1,288 @@
+# ImageNet-1K Cleaning Policy
+
+# =============================
+
+# 
+
+# This policy defines filtering rules for cleaning ImageNet-1K training set
+#using Visual Layer's analysis signals.
+
+# 
+
+# Created: 2026-01-26
+
+# Purpose: Create clean baseline for noise robustness experiments
+
+# Expected removal: 20-30% of images
+
+# Metadata
+
+policy_version: '1.0'
+policy_name: 'imagenet_1k_aggressive_clean'
+dataset: 'ImageNet-1K Training Set'
+created_by: 'Research Team'
+date_created: '2026-01-26'
+
+# Description
+
+notes: |
+Aggressive cleaning policy for ImageNet-1K baseline dataset.
+Expected to remove 20-30% of images focusing on:
+- Near-duplicates (via cluster dedup + uniqueness filtering)
+- Confirmed mislabels (ML-detected)
+- Visual and label outliers
+- Low-quality images (blur, darkness, corruption)
+
+Use this for training high-quality models where dataset size
+can be sacrificed for cleanliness.
+
+For noise injection experiments, this creates a clean baseline
+that teammates can then corrupt with controlled label noise.
+
+# ============================================================================
+
+# UNIQUENESS FILTERING
+
+# ============================================================================
+
+# Visual Layer's uniqueness_score measures visual distinctiveness (0-1 scale)
+
+# Lower scores indicate near-duplicates or highly similar images
+
+# 
+
+# Recommended thresholds:
+
+# 0.2 - Very conservative (removes ~5%)
+
+# 0.3 - Aggressive (removes ~15-25%) ← Recommended for ImageNet
+
+# 0.4 - Very aggressive (removes ~30-40%)
+
+uniqueness_threshold: 0.3
+
+# ============================================================================
+
+# CLUSTER-BASED DEDUPLICATION
+
+# ============================================================================
+
+# Visual Layer groups visually similar images into clusters
+
+# When enabled, keeps only the highest-uniqueness image per cluster
+
+# 
+
+# This removes near-duplicates that may have slightly different:
+
+# - Crops
+
+# - Resolutions
+
+# - Color corrections
+
+# - Minor transformations
+
+dedupe_by_cluster: true
+
+# ============================================================================
+
+# VISUAL LAYER ISSUE DETECTION
+
+# ============================================================================
+
+# Visual Layer detects quality issues with confidence scores (0-1)
+
+# Only images meeting BOTH criteria are dropped:
+
+# 1. Has the specified issue_type
+
+# 2. Confidence >= min_confidence threshold
+
+# 
+
+# Common issue types detected by Visual Layer:
+
+# - mislabel: Images that don't match their assigned class
+
+# - label_outlier: Images that are outliers within their class
+
+# - visual_outlier: Images that are anomalous in the entire dataset
+
+# - blurry: Low image quality - blurry
+
+# - dark: Low image quality - too dark
+
+# - overexposed: Low image quality - overexposed
+
+# - corrupted: Corrupted or unreadable images
+
+drop_issues:
+
+# Critical: Mislabeled images
+
+- issue_type: 'mislabel'
+  min_confidence: 0.7
+  description: 'Images that dont match their assigned class'
+  priority: 'high'
+
+# Label outliers within class
+
+- issue_type: 'label_outlier'
+  min_confidence: 0.8
+  description: 'Outliers within their class (may be edge cases)'
+  priority: 'high'
+
+# Visual outliers in entire dataset
+
+- issue_type: 'visual_outlier'
+  min_confidence: 0.75
+  description: 'Anomalous images in the entire dataset'
+  priority: 'medium'
+
+# Image quality issues
+
+# - issue_type: 'blurry'
+#   min_confidence: 0.8
+#   description: 'Low image quality - blurry'
+#   priority: 'medium'
+# - issue_type: 'dark'
+#   min_confidence: 0.85
+#   description: 'Low image quality - too dark'
+#   priority: 'medium'
+# - issue_type: 'overexposed'
+#   min_confidence: 0.85
+#   description: 'Low image quality - overexposed'
+#   priority: 'medium'
+
+# Critical: Corrupted files
+
+# - issue_type: 'corrupted'
+#   min_confidence: 0.5
+#   description: 'Corrupted or unreadable images'
+#   priority: 'critical'
+
+# ============================================================================
+
+# USER TAG FILTERING
+
+# ============================================================================
+
+# Tags manually applied through Visual Layer UI or API
+
+# Any image with ANY of these tags will be dropped
+
+# 
+
+# Use these for manual quality control and spot-checking
+
+drop_tags:
+
+- 'incorrect_label'
+- 'mislabeled'
+- 'delete'
+- 'remove'
+- 'poor_quality'
+- 'bad_example'
+- 'suspicious'
+- 'test_image'
+- 'duplicate'
+- 'review_later'
+
+# ============================================================================
+
+# ALTERNATIVE CONFIGURATIONS
+
+# ============================================================================
+
+# Uncomment and modify these sections to try different cleaning strategies
+
+# Conservative policy (minimal removal, ~5-10%)
+
+# uniqueness_threshold: 0.2
+
+# dedupe_by_cluster: false
+
+# drop_issues:
+
+# - issue_type: 'mislabel'
+
+# min_confidence: 0.9
+
+# - issue_type: 'corrupted'
+
+# min_confidence: 0.7
+
+# Very aggressive policy (maximum cleaning, ~40-50%)
+
+# uniqueness_threshold: 0.4
+
+# dedupe_by_cluster: true
+
+# drop_issues:
+
+# - issue_type: 'mislabel'
+
+# min_confidence: 0.5
+
+# - issue_type: 'label_outlier'
+
+# min_confidence: 0.6
+
+# - issue_type: 'visual_outlier'
+
+# min_confidence: 0.6
+
+# - issue_type: 'blurry'
+
+# min_confidence: 0.6
+
+# - issue_type: 'dark'
+
+# min_confidence: 0.7
+
+# ============================================================================
+
+# USAGE NOTES
+
+# ============================================================================
+
+# 
+
+# To modify this policy:
+
+# 1. Adjust uniqueness_threshold (higher = more aggressive)
+
+# 2. Enable/disable dedupe_by_cluster
+
+# 3. Add/remove issue types
+
+# 4. Adjust min_confidence thresholds (lower = more aggressive)
+
+# 5. Add/remove user tags
+
+# 
+
+# To apply this policy:
+
+# python clean_imagenet.py –dataset-id YOUR_ID –policy cleaning_policy.yaml
+
+# 
+
+# To test different thresholds:
+
+# # Create copies with different settings
+
+# cp cleaning_policy.yaml policy_conservative.yaml
+
+# # Edit policy_conservative.yaml
+
+# python clean_imagenet.py –policy policy_conservative.yaml
+
+# 
+
+# To share with teammates:
+
+# # This file is automatically included in the clean dataset export
+
+# # Teammates can see exactly how the dataset was cleaned
