@@ -1,3 +1,6 @@
 files/
 .DS_Store
 alec/__pycache__
+alec/coco_random
+alec/embeddings.npy
+alec/labels/labels_clean.csv
