@@ -1,23 +1,42 @@
 #!/usr/bin/env python3
 import argparse
 import os
+from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.neighbors import NearestNeighbors
 
 
-def load_inputs(embeddings_path: str, labels_path: str, id_col: str, label_col: str):
-    X = np.load(embeddings_path)
+
+
+def resolve_repo_path(raw_path: str, repo_root: Path) -> str:
+    if not raw_path:
+        return raw_path
+    p = Path(raw_path)
+    if p.is_absolute():
+        return str(p)
+    return str((repo_root / p).resolve())
+
+
+def load_inputs(embeddings_path: str, labels_path: str, id_col: str, label_col: str, require_embeddings: bool):
+    repo_root = Path(__file__).resolve().parents[1]
+    labels_path = resolve_repo_path(labels_path, repo_root)
+    embeddings_path = resolve_repo_path(embeddings_path, repo_root)
     df = pd.read_csv(labels_path)
 
-    if X.shape[0] != len(df):
-        raise ValueError(
-            f"Row mismatch: embeddings rows={X.shape[0]} vs labels rows={len(df)}"
-        )
-    if id_col not in df.columns:
-        raise ValueError(f"Missing id column '{id_col}' in labels CSV.")
     if label_col not in df.columns:
         raise ValueError(f"Missing label column '{label_col}' in labels CSV.")
+
+    X = None
+    if require_embeddings:
+        X = np.load(embeddings_path)
+        if X.shape[0] != len(df):
+            raise ValueError(
+                f"Row mismatch: embeddings rows={X.shape[0]} vs labels rows={len(df)}"
+            )
+
+    if id_col not in df.columns:
+        raise ValueError(f"Missing id column '{id_col}' in labels CSV.")
 
     ids = df[id_col].astype(str).values
     y = df[label_col].values
@@ -282,7 +301,7 @@ def inject_cluster_exact(X, y, metric, noise_level, random_seed, cluster_size, n
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--embeddings", type=str, required=True)
+    ap.add_argument("--embeddings", type=str, required=False, default="")
     ap.add_argument("--labels", type=str, required=True)
     ap.add_argument("--id-column", type=str, default="vector_id")
     ap.add_argument("--label-column", type=str, default="label")
@@ -305,7 +324,12 @@ def main():
 
     args = ap.parse_args()
 
-    X, df, ids, y = load_inputs(args.embeddings, args.labels, args.id_column, args.label_column)
+    require_embeddings = args.mode in ("border", "cluster")
+    if require_embeddings and not args.embeddings:
+        raise ValueError("--embeddings is required for border/cluster modes.")
+    X, df, ids, y = load_inputs(
+        args.embeddings, args.labels, args.id_column, args.label_column, require_embeddings=require_embeddings
+    )
 
     if args.cluster_size < 1:
         raise ValueError("cluster-size must be >= 1")
