@@ -2,7 +2,6 @@
 import argparse
 import os
 from pathlib import Path
-import sys
 import numpy as np
 import pandas as pd
 from sklearn.neighbors import NearestNeighbors
@@ -254,7 +253,7 @@ def inject_cluster_exact(X, y, metric, noise_level, random_seed, cluster_size, n
       - pick random seed points (not yet changed)
       - for each seed, define a local cluster as its nearest neighbors (including itself)
       - flip as many points in that cluster as needed to hit the exact target
-      - each cluster uses a single target label (nearest different-label neighbor of the seed)
+      - each flipped point uses nearest DIFFERENT-label neighbor label (so it truly changes)
     """
     n = len(y)
     target = target_num_changes(n, noise_level)
@@ -277,12 +276,6 @@ def inject_cluster_exact(X, y, metric, noise_level, random_seed, cluster_size, n
         if changed[seed]:
             continue
 
-        # Choose a single target label for this cluster (from seed's nearest diff-label neighbor)
-        seed_nn = nearest_diff_neighbor(neigh[seed], y_new, seed)
-        if seed_nn is None:
-            continue
-        cluster_target = choose_flip_label_from_neighbor(y_new, seed_nn)
-
         # cluster members: closest cluster_size points (include seed)
         members = []
         for j in neigh[seed]:
@@ -296,7 +289,11 @@ def inject_cluster_exact(X, y, metric, noise_level, random_seed, cluster_size, n
                 break
             if changed[i]:
                 continue
-            if apply_point_flip(y_new, i, cluster_target, changed, log_rows, reason=f"cluster_seed_{seed}"):
+            j = nearest_diff_neighbor(neigh[i], y_new, i)
+            if j is None:
+                continue
+            new_label = choose_flip_label_from_neighbor(y_new, j)
+            if apply_point_flip(y_new, i, new_label, changed, log_rows, reason=f"cluster_seed_{seed}"):
                 changes += 1
 
     return y_new, log_rows
@@ -327,9 +324,6 @@ def main():
 
     args = ap.parse_args()
 
-    if "--random-seed" not in sys.argv:
-        print('[noise_injection] warning: --random-seed not provided; using default ' + f"{args.random_seed}. Results are seed-dependent.")
-
     require_embeddings = args.mode in ("border", "cluster")
     if require_embeddings and not args.embeddings:
         raise ValueError("--embeddings is required for border/cluster modes.")
@@ -357,12 +351,6 @@ def main():
             random_seed=args.random_seed, boundary_k=args.boundary_k,
             nn_k=args.nn_k, boundary_top_frac=args.boundary_top_frac
         )
-        border_count = sum(1 for r in log_rows if r.get("reason") == "border")
-        fill_count = sum(1 for r in log_rows if r.get("reason") == "border_fill_nn")
-        print(f"[noise_injection] border pool flips: {border_count}")
-        print(f"[noise_injection] fill flips:        {fill_count}")
-        if fill_count > 0:
-            print("[noise_injection] warning: fill flips were needed to reach target.")
     elif args.mode == "cluster":
         y_new, log_rows = inject_cluster_exact(
             X, y, metric=args.metric, noise_level=args.noise_level,
