@@ -1,8 +1,20 @@
 # Environment variables
 .env
-clean_imagenet1k/*.storage_state.json
-clean_imagenet1k/.vl_storage_state.json
-.env
 *.env
 **/*.env
 .env.local
+
+# Visual Layer auth/session
+clean_imagenet1k/*.storage_state.json
+clean_imagenet1k/.vl_storage_state.json
+
+# Generated discovery artifacts
+clean_imagenet1k/discover/
+clean_imagenet1k/discover_*.json
+clean_imagenet1k/cluster_ids*.txt
+!clean_imagenet1k/cluster_ids.example.txt
+CLEANING_READY.flag
+
+# Python cache
+__pycache__/
+*.pyc

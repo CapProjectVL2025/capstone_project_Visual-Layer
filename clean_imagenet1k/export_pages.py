@@ -84,6 +84,21 @@ def json_dump(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def write_cleaning_ready_flag(flag_path: Path, cluster_count: int, dataset_id: str) -> None:
+    """
+    Emit an explicit handoff marker for downstream cleaning steps.
+
+    READY=1 means discovery/export reached a usable state with discovered clusters.
+    """
+    flag_path.parent.mkdir(parents=True, exist_ok=True)
+    flag_path.write_text(
+        "READY=1\n"
+        f"CLUSTERS={int(cluster_count)}\n"
+        f"DATASET_ID={dataset_id}\n",
+        encoding="utf-8",
+    )
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as f:
@@ -341,6 +356,39 @@ def set_query_value(url: str, key: str, value: Any) -> str:
     return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
 
 
+def parse_clusters_range_count(text: str) -> Optional[int]:
+    if not text:
+        return None
+    match = re.search(r"([0-9,]+)\s*-\s*([0-9,]+)\s+Clusters\b", str(text), flags=re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        start = int(match.group(1).replace(",", ""))
+        end = int(match.group(2).replace(",", ""))
+    except Exception:
+        return None
+    if end < start:
+        return None
+    return (end - start) + 1
+
+
+def resolve_discover_dir(out_path: Path, discover_dir_arg: Optional[str]) -> Path:
+    if discover_dir_arg:
+        return Path(discover_dir_arg)
+    return out_path.parent / "discover"
+
+
+def discover_artifact_paths(discover_dir: Path) -> Dict[str, Path]:
+    return {
+        "dir": discover_dir,
+        "checkpoint": discover_dir / "discover_checkpoint.json",
+        "failures": discover_dir / "discover_failures.json",
+        "summary": discover_dir / "discover_summary.json",
+        "debug_html": discover_dir / "ui_debug_last_page.html",
+        "debug_png": discover_dir / "ui_debug_last_page.png",
+    }
+
+
 def discover_cluster_ids_via_ui(
     dataset_id: str,
     out_path: Path,
@@ -362,10 +410,15 @@ def discover_cluster_ids_via_ui(
     failures: List[Dict[str, Any]] = []
     cluster_ids: Set[str] = set()
     pages_scanned = 0
+    discover_dir = checkpoint_path.parent
+    summary_path = discover_dir / "discover_summary.json"
+    debug_html_path = discover_dir / "ui_debug_last_page.html"
+    debug_png_path = discover_dir / "ui_debug_last_page.png"
     list_url = ui_list_url or f"{vl_base_url()}/dataset/{dataset_id}/data"
     start_page_number = max(1, get_query_int(list_url, "page", 1))
     current_list_url = set_query_value(list_url, "page", start_page_number)
     dataset_id_lc = str(dataset_id).strip().lower()
+    network_cluster_ids: Set[str] = set()
 
     try:
         from playwright.sync_api import sync_playwright  # type: ignore
@@ -390,7 +443,7 @@ def discover_cluster_ids_via_ui(
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text("", encoding="utf-8")
         json_dump(
-            out_path.parent / "discover_summary.json",
+            summary_path,
             {
                 "dataset_id": dataset_id,
                 "cluster_ids_file": str(out_path),
@@ -424,6 +477,28 @@ def discover_cluster_ids_via_ui(
                     )
             context = browser.new_context(**context_kwargs)
             page = context.new_page()
+
+            def on_response(response: Any) -> None:
+                try:
+                    url_l = str(response.url).lower()
+                    if "/api/" not in url_l and "graphql" not in url_l:
+                        return
+                    headers = response.headers if isinstance(response.headers, dict) else {}
+                    content_type = str(headers.get("content-type", "")).lower()
+                    if "json" not in content_type and "graphql" not in url_l:
+                        return
+                    payload = response.json()
+                except Exception:
+                    return
+                try:
+                    for candidate in walk_for_cluster_ids(payload):
+                        value = str(candidate).strip().lower()
+                        if UUID_RE.match(value) and value != dataset_id_lc:
+                            network_cluster_ids.add(value)
+                except Exception:
+                    return
+
+            page.on("response", on_response)
             page.goto(current_list_url, wait_until="domcontentloaded", timeout=ui_timeout_ms)
             page.wait_for_timeout(1000)
 
@@ -458,6 +533,19 @@ def discover_cluster_ids_via_ui(
                 pages_scanned += 1
                 page.wait_for_timeout(400)
                 dataset_page_number = start_page_number + (page_index - 1)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=min(ui_timeout_ms, 8000))
+                except Exception:
+                    pass
+                body_text = ""
+                try:
+                    body_text = page.inner_text("body")
+                except Exception:
+                    body_text = ""
+                expected_clusters_on_page = parse_clusters_range_count(body_text)
+                before_network_merge = len(cluster_ids)
+                cluster_ids.update(network_cluster_ids)
+                new_ids_on_page = len(cluster_ids) - before_network_merge
 
                 deadline = time.time() + max(1, int(ui_timeout_ms)) / 1000.0
                 active_selector = selector
@@ -498,15 +586,13 @@ def discover_cluster_ids_via_ui(
                     page.wait_for_timeout(500)
 
                 if count == 0:
-                    debug_html = out_path.parent / "ui_debug_last_page.html"
-                    debug_png = out_path.parent / "ui_debug_last_page.png"
                     try:
-                        debug_html.parent.mkdir(parents=True, exist_ok=True)
-                        debug_html.write_text(page.content(), encoding="utf-8")
+                        debug_html_path.parent.mkdir(parents=True, exist_ok=True)
+                        debug_html_path.write_text(page.content(), encoding="utf-8")
                     except Exception:
                         pass
                     try:
-                        page.screenshot(path=str(debug_png), full_page=True)
+                        page.screenshot(path=str(debug_png_path), full_page=True)
                     except Exception:
                         pass
                     attempts_msg = ", ".join(f"'{sel}' -> {cnt}" for sel, cnt in selector_attempts)
@@ -518,22 +604,106 @@ def discover_cluster_ids_via_ui(
                             "message": (
                                 f"No cluster UI items found on page {page_index}. "
                                 f"Selector attempts: {attempts_msg}. "
-                                f"Debug files: {debug_html}, {debug_png}"
+                                f"Debug files: {debug_html_path}, {debug_png_path}"
                             ),
                             "timestamp": now_utc_iso(),
                         }
                     )
                     break
 
-                limit = min(count, ui_max_clusters_per_page)
-                if count > ui_max_clusters_per_page:
+                card_targets: List[Dict[str, Any]] = []
+                try:
+                    raw_targets = page.evaluate(
+                        """
+                        () => {
+                          function hasImagesLabel(text) {
+                            return /\\b\\d[\\d,]*\\s+Images\\b/i.test(text || "");
+                          }
+                          function labelCount(text) {
+                            const m = (text || "").match(/\\b\\d[\\d,]*\\s+Images\\b/gi);
+                            return m ? m.length : 0;
+                          }
+                          const labels = [];
+                          for (const el of Array.from(document.querySelectorAll("*"))) {
+                            const txt = (el.textContent || "").trim();
+                            if (!txt || txt.length > 64) {
+                              continue;
+                            }
+                            if (hasImagesLabel(txt)) {
+                              labels.push(el);
+                            }
+                          }
+                          const seen = new Set();
+                          const out = [];
+                          for (const el of labels) {
+                            let cur = el;
+                            let best = null;
+                            while (cur && cur !== document.body) {
+                              const r = cur.getBoundingClientRect();
+                              const imgs = cur.querySelectorAll("img").length;
+                              const labelsInNode = labelCount(cur.innerText || "");
+                              const ok =
+                                r.width >= 140 &&
+                                r.width <= 900 &&
+                                r.height >= 120 &&
+                                r.height <= 900 &&
+                                imgs >= 4 &&
+                                imgs <= 80 &&
+                                labelsInNode >= 1 &&
+                                labelsInNode <= 3;
+                              if (ok) {
+                                const area = r.width * r.height;
+                                if (!best || area < best.area) {
+                                  best = {
+                                    absX: r.left + window.scrollX,
+                                    absY: r.top + window.scrollY,
+                                    width: r.width,
+                                    height: r.height,
+                                    area,
+                                  };
+                                }
+                              }
+                              cur = cur.parentElement;
+                            }
+                            if (!best) {
+                              continue;
+                            }
+                            const sig = `${Math.round(best.absX)}:${Math.round(best.absY)}:${Math.round(best.width)}:${Math.round(best.height)}`;
+                            if (seen.has(sig)) {
+                              continue;
+                            }
+                            seen.add(sig);
+                            out.push({
+                              signature: sig,
+                              abs_x: best.absX,
+                              abs_y: best.absY,
+                              width: best.width,
+                              height: best.height,
+                            });
+                          }
+                          out.sort((a, b) => (a.abs_y === b.abs_y ? a.abs_x - b.abs_x : a.abs_y - b.abs_y));
+                          return out;
+                        }
+                        """
+                    )
+                    if isinstance(raw_targets, list):
+                        for target in raw_targets:
+                            if not isinstance(target, dict):
+                                continue
+                            card_targets.append(target)
+                except Exception:
+                    card_targets = []
+
+                targets_total = len(card_targets) if card_targets else count
+                limit = min(targets_total, ui_max_clusters_per_page)
+                if targets_total > ui_max_clusters_per_page:
                     failures.append(
                         {
                             "kind": "ui_cluster_page_truncated",
                             "status": 0,
                             "snippet": "",
                             "message": (
-                                f"Page {dataset_page_number} has {count} cluster cards but "
+                                f"Page {dataset_page_number} has {targets_total} cluster cards but "
                                 f"ui_max_clusters_per_page={ui_max_clusters_per_page}. "
                                 "Increase --ui-max-clusters-per-page to avoid partial discovery."
                             ),
@@ -541,270 +711,164 @@ def discover_cluster_ids_via_ui(
                         }
                     )
                 print(
-                    f"[ui page {dataset_page_number}] visiting {limit}/{count} cluster cards",
+                    f"[ui page {dataset_page_number}] visiting {limit}/{targets_total} cluster cards",
                     file=sys.stderr,
                 )
-                item_idx = 0
-                new_ids_on_page = 0
-                visited_card_signatures: Set[str] = set()
-                while item_idx < limit:
-                    items = page.locator(active_selector)
-                    current_count = items.count()
-                    if item_idx >= current_count:
-                        break
-                    item = items.nth(item_idx)
-                    click_target = item
-
-                    href_value = item.get_attribute("href") or ""
-                    if not href_value:
-                        # Cluster cards are often wrappers with a nested <a>; inspect that first
-                        # so we can extract cluster_id without navigating.
-                        try:
-                            nested_link = item.locator("a[href*='/cluster/']").first
-                            if nested_link.count() > 0:
-                                href_value = nested_link.get_attribute("href") or ""
-                        except Exception:
-                            href_value = href_value or ""
-                    href_cluster_id = (
-                        extract_cluster_uuid_from_text(href_value)
-                        or extract_uuid_excluding(href_value, dataset_id_lc)
+                should_click = True
+                if expected_clusters_on_page is not None and new_ids_on_page >= expected_clusters_on_page:
+                    print(
+                        f"[ui page {dataset_page_number}] network responses already yielded "
+                        f"{new_ids_on_page}/{expected_clusters_on_page} cluster_ids; skipping clicks",
+                        file=sys.stderr,
                     )
-                    if href_cluster_id and not ui_force_click:
-                        before = len(cluster_ids)
-                        cluster_ids.add(href_cluster_id)
-                        if len(cluster_ids) > before:
-                            new_ids_on_page += 1
-                        item_idx += 1
-                        continue
+                    should_click = False
 
-                    # Skip non-cluster links to avoid permission errors on unrelated entities.
-                    if href_value and "/cluster/" not in href_value:
-                        item_idx += 1
-                        continue
-
-                    # If this is already a cluster link but UUID was not parseable, skip by default
-                    # instead of clicking into potentially inaccessible entities.
-                    if href_value and "/cluster/" in href_value and not ui_force_click and not href_cluster_id:
-                        failures.append(
-                            {
-                                "kind": "ui_cluster_href_missing_uuid",
-                                "status": 0,
-                                "snippet": "",
-                                "message": (
-                                    f"Cluster link without parseable UUID on page {page_index}, "
-                                    f"index {item_idx}: '{href_value}'"
-                                ),
-                                "timestamp": now_utc_iso(),
-                            }
-                        )
-                        item_idx += 1
-                        continue
-
-                    # For text-based selectors, resolve a local cluster-card box and click
-                    # coordinates so each text match maps to its own card.
-                    click_box = None
-                    if "text=" in active_selector or ":text" in active_selector:
+                click_misses = 0
+                if should_click and card_targets:
+                    for idx, target in enumerate(card_targets[:limit]):
                         try:
-                            resolved = item.evaluate(
-                                """
-                                (el) => {
-                                  function toBox(r) {
-                                    return {x: r.x, y: r.y, width: r.width, height: r.height};
-                                  }
-                                  function labelCount(text) {
-                                    const m = (text || "").match(/\\b\\d[\\d,]*\\s+Images\\b/gi);
-                                    return m ? m.length : 0;
-                                  }
-                                  let best = null;
-                                  let cur = el;
-                                  while (cur && cur !== document.body) {
-                                    const r = cur.getBoundingClientRect();
-                                    const labels = labelCount(cur.innerText || "");
-                                    const imgCount = cur.querySelectorAll("img").length;
-                                    const isCardLike =
-                                      r.width >= 140 &&
-                                      r.width <= 700 &&
-                                      r.height >= 120 &&
-                                      r.height <= 700 &&
-                                      labels >= 1 &&
-                                      labels <= 2 &&
-                                      imgCount >= 4 &&
-                                      imgCount <= 40;
-                                    if (isCardLike) {
-                                      const area = r.width * r.height;
-                                      if (!best || area < best.area) {
-                                        best = {x: r.x, y: r.y, width: r.width, height: r.height, area};
-                                      }
-                                    }
-                                    cur = cur.parentElement;
-                                  }
-                                  if (best) {
-                                    return {x: best.x, y: best.y, width: best.width, height: best.height};
-                                  }
-                                  const r = el.getBoundingClientRect();
-                                  return toBox(r);
-                                }
-                                """
-                            )
-                            if isinstance(resolved, dict):
-                                click_box = {
-                                    "x": float(resolved.get("x", 0.0)),
-                                    "y": float(resolved.get("y", 0.0)),
-                                    "width": float(resolved.get("width", 0.0)),
-                                    "height": float(resolved.get("height", 0.0)),
-                                }
+                            abs_x = float(target.get("abs_x", 0.0))
+                            abs_y = float(target.get("abs_y", 0.0))
+                            width = float(target.get("width", 0.0))
+                            height = float(target.get("height", 0.0))
                         except Exception:
-                            click_box = None
-
-                    card_signature = ""
-                    try:
-                        click_target.scroll_into_view_if_needed(timeout=ui_timeout_ms)
-                    except Exception:
-                        pass
-                    if not click_box:
-                        try:
-                            raw_box = click_target.bounding_box()
-                            if raw_box:
-                                click_box = {
-                                    "x": float(raw_box.get("x", 0.0)),
-                                    "y": float(raw_box.get("y", 0.0)),
-                                    "width": float(raw_box.get("width", 0.0)),
-                                    "height": float(raw_box.get("height", 0.0)),
-                                }
-                        except Exception:
-                            click_box = None
-                    if click_box:
-                        card_signature = (
-                            f"{int(round(click_box['x']))}:"
-                            f"{int(round(click_box['y']))}:"
-                            f"{int(round(click_box['width']))}:"
-                            f"{int(round(click_box['height']))}"
-                        )
-                    if card_signature:
-                        if card_signature in visited_card_signatures:
-                            item_idx += 1
                             continue
-                        visited_card_signatures.add(card_signature)
+                        if abs_x < 30 or abs_y < 120 or width <= 0 or height <= 0:
+                            continue
 
-                    # Guardrail: never click outside the main dataset grid region.
-                    if click_box and (click_box["x"] < 40 or click_box["y"] < 140):
-                        failures.append(
-                            {
-                                "kind": "ui_click_box_outside_grid",
-                                "status": 0,
-                                "snippet": "",
-                                "message": (
-                                    f"Skipping suspicious click target on page {page_index}, index {item_idx}: "
-                                    f"{click_box}"
-                                ),
-                                "timestamp": now_utc_iso(),
-                            }
-                        )
-                        item_idx += 1
-                        continue
-
-                    before_url = page.url
-                    try:
-                        if click_box and click_box["width"] > 0 and click_box["height"] > 0:
-                            click_x = click_box["x"] + max(8.0, min(click_box["width"] / 2.0, click_box["width"] - 8.0))
-                            click_y = click_box["y"] + max(8.0, min(click_box["height"] * 0.2, click_box["height"] - 8.0))
+                        before_url = page.url
+                        try:
+                            page.evaluate("(y) => window.scrollTo(0, Math.max(0, y))", max(0.0, abs_y - 120.0))
+                            page.wait_for_timeout(120)
+                            scroll_y = float(page.evaluate("() => window.scrollY"))
+                            viewport_h = float(page.evaluate("() => window.innerHeight"))
+                            click_x = abs_x + max(10.0, min(width * 0.45, width - 10.0))
+                            click_y = (abs_y - scroll_y) + max(10.0, min(height * 0.20, height - 10.0))
+                            if click_y > viewport_h - 6.0:
+                                click_y = viewport_h - 6.0
+                            if click_y < 6.0:
+                                click_y = 6.0
                             page.mouse.click(click_x, click_y)
-                        else:
-                            click_target.click(timeout=ui_timeout_ms)
-                        try:
-                            page.wait_for_url("**/cluster/**", timeout=min(5000, ui_timeout_ms))
-                        except Exception:
-                            page.wait_for_timeout(500)
-                    except Exception as exc:
-                        failures.append(
-                            {
-                                "kind": "ui_click_failed",
-                                "status": 0,
-                                "snippet": "",
-                                "message": f"Click failed on page {page_index}, index {item_idx}: {exc}",
-                                "timestamp": now_utc_iso(),
-                            }
-                        )
-                        item_idx += 1
-                        continue
-
-                    if page.url == before_url and click_box:
-                        # Retry by clicking the center of the visual card.
-                        try:
-                            page.mouse.click(
-                                click_box["x"] + (click_box["width"] / 2.0),
-                                click_box["y"] + min(click_box["height"] * 0.7, click_box["height"] - 4),
-                            )
                             try:
-                                page.wait_for_url("**/cluster/**", timeout=min(4000, ui_timeout_ms))
+                                page.wait_for_url("**/cluster/**", timeout=min(5000, ui_timeout_ms))
                             except Exception:
                                 page.wait_for_timeout(400)
-                        except Exception:
-                            pass
-
-                    cluster_id = (
-                        extract_cluster_uuid_from_text(page.url)
-                        or extract_uuid_excluding(page.url, dataset_id_lc)
-                        or href_cluster_id
-                    )
-                    if not cluster_id and page.url != before_url:
-                        try:
-                            hrefs = page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
-                            if isinstance(hrefs, list):
-                                for href in hrefs:
-                                    cluster_id = (
-                                        extract_cluster_uuid_from_text(str(href))
-                                        or extract_uuid_excluding(str(href), dataset_id_lc)
-                                    )
-                                    if cluster_id:
-                                        break
-                        except Exception:
-                            pass
-
-                    if cluster_id:
-                        before = len(cluster_ids)
-                        cluster_ids.add(cluster_id)
-                        if len(cluster_ids) > before:
-                            new_ids_on_page += 1
-                    else:
-                        failures.append(
-                            {
-                                "kind": "ui_cluster_id_missing_after_click",
-                                "status": 0,
-                                "snippet": "",
-                                "message": (
-                                    f"Could not extract cluster_id after click on page {page_index}, "
-                                    f"index {item_idx}, url '{page.url}'"
-                                ),
-                                "timestamp": now_utc_iso(),
-                            }
-                        )
-
-                    if page.url != before_url:
-                        try:
-                            # Deterministic return: navigate directly to the list URL we were on
-                            # before opening the cluster details.
-                            page.goto(before_url, wait_until="domcontentloaded", timeout=ui_timeout_ms)
-                            page.wait_for_timeout(350)
                         except Exception as exc:
-                            failures.append(
-                                {
-                                    "kind": "ui_return_to_list_failed",
-                                    "status": 0,
-                                    "snippet": "",
-                                    "message": f"Failed to return to list page after click: {exc}",
-                                    "timestamp": now_utc_iso(),
-                                }
-                            )
+                            click_misses += 1
+                            continue
+
+                        if page.url == before_url:
+                            # Retry lower inside card body if first click did not navigate.
+                            try:
+                                scroll_y = float(page.evaluate("() => window.scrollY"))
+                                click_x = abs_x + max(10.0, min(width * 0.50, width - 10.0))
+                                click_y = (abs_y - scroll_y) + max(10.0, min(height * 0.65, height - 10.0))
+                                page.mouse.click(click_x, click_y)
+                                try:
+                                    page.wait_for_url("**/cluster/**", timeout=min(4000, ui_timeout_ms))
+                                except Exception:
+                                    page.wait_for_timeout(350)
+                            except Exception:
+                                pass
+
+                        cluster_id = (
+                            extract_cluster_uuid_from_text(page.url)
+                            or extract_uuid_excluding(page.url, dataset_id_lc)
+                        )
+                        if cluster_id:
+                            before = len(cluster_ids)
+                            cluster_ids.add(cluster_id)
+                            if len(cluster_ids) > before:
+                                new_ids_on_page += 1
+                        else:
+                            click_misses += 1
+
+                        if page.url != before_url:
+                            try:
+                                page.goto(before_url, wait_until="domcontentloaded", timeout=ui_timeout_ms)
+                                page.wait_for_timeout(280)
+                            except Exception as exc:
+                                failures.append(
+                                    {
+                                        "kind": "ui_return_to_list_failed",
+                                        "status": 0,
+                                        "snippet": "",
+                                        "message": f"Failed to return to list page after click: {exc}",
+                                        "timestamp": now_utc_iso(),
+                                    }
+                                )
+                                break
+                        else:
+                            try:
+                                page.keyboard.press("Escape")
+                                page.wait_for_timeout(150)
+                            except Exception:
+                                pass
+                        # Merge any cluster IDs observed via API responses while navigating.
+                        before_merge = len(cluster_ids)
+                        cluster_ids.update(network_cluster_ids)
+                        new_ids_on_page += len(cluster_ids) - before_merge
+                elif should_click:
+                    # Fallback to locator-index traversal if card-box detection fails.
+                    item_idx = 0
+                    while item_idx < limit:
+                        items = page.locator(active_selector)
+                        current_count = items.count()
+                        if item_idx >= current_count:
                             break
-                    else:
-                        # Some UIs open side panels instead of full navigation.
+                        item = items.nth(item_idx)
+                        before_url = page.url
                         try:
-                            page.keyboard.press("Escape")
-                            page.wait_for_timeout(250)
+                            item.scroll_into_view_if_needed(timeout=ui_timeout_ms)
+                            item.click(timeout=ui_timeout_ms)
+                            try:
+                                page.wait_for_url("**/cluster/**", timeout=min(5000, ui_timeout_ms))
+                            except Exception:
+                                page.wait_for_timeout(350)
                         except Exception:
-                            pass
-                    item_idx += 1
+                            item_idx += 1
+                            continue
+
+                        cluster_id = (
+                            extract_cluster_uuid_from_text(page.url)
+                            or extract_uuid_excluding(page.url, dataset_id_lc)
+                        )
+                        if cluster_id:
+                            before = len(cluster_ids)
+                            cluster_ids.add(cluster_id)
+                            if len(cluster_ids) > before:
+                                new_ids_on_page += 1
+                        else:
+                            click_misses += 1
+                        if page.url != before_url:
+                            try:
+                                page.goto(before_url, wait_until="domcontentloaded", timeout=ui_timeout_ms)
+                                page.wait_for_timeout(240)
+                            except Exception:
+                                break
+                        item_idx += 1
+                        before_merge = len(cluster_ids)
+                        cluster_ids.update(network_cluster_ids)
+                        new_ids_on_page += len(cluster_ids) - before_merge
+
+                if should_click and click_misses > 0:
+                    print(
+                        f"[ui page {dataset_page_number}] click misses: {click_misses}",
+                        file=sys.stderr,
+                    )
+                if expected_clusters_on_page is not None and new_ids_on_page < expected_clusters_on_page:
+                    failures.append(
+                        {
+                            "kind": "ui_page_incomplete_cluster_ids",
+                            "status": 0,
+                            "snippet": "",
+                            "message": (
+                                f"Page {dataset_page_number} expected ~{expected_clusters_on_page} clusters "
+                                f"from UI range text, but discovered {new_ids_on_page} new cluster_ids."
+                            ),
+                            "timestamp": now_utc_iso(),
+                        }
+                    )
 
                 json_dump(
                     checkpoint_path,
@@ -892,16 +956,10 @@ def discover_cluster_ids_via_ui(
     out_path.write_text("\n".join(sorted_ids) + ("\n" if sorted_ids else ""), encoding="utf-8")
 
     if not failures and sorted_ids and flag_out:
-        flag_out.parent.mkdir(parents=True, exist_ok=True)
-        flag_out.write_text(
-            "READY=1\n"
-            f"CLUSTERS={len(sorted_ids)}\n"
-            f"DATASET_ID={dataset_id}\n",
-            encoding="utf-8",
-        )
+        write_cleaning_ready_flag(flag_out, cluster_count=len(sorted_ids), dataset_id=dataset_id)
 
     json_dump(
-        out_path.parent / "discover_summary.json",
+        summary_path,
         {
             "dataset_id": dataset_id,
             "cluster_ids_file": str(out_path),
@@ -934,7 +992,10 @@ def discover_cluster_ids_via_ui(
                 "failures": failures,
             },
         )
-        print("UI discovery incomplete. See discover_summary/failures manifest.", file=sys.stderr)
+        print(
+            f"UI discovery incomplete. See: {summary_path} and {failures_path}",
+            file=sys.stderr,
+        )
         return 4
 
     print(f"Wrote {len(sorted_ids)} unique cluster_ids to: {out_path}")
@@ -1597,6 +1658,7 @@ def discover_cluster_ids(
 ) -> int:
     auth = JWTAuthProvider.from_env()
     session = requests.Session()
+    summary_path = checkpoint_path.parent / "discover_summary.json"
     cluster_ids: Set[str] = set()
     empty_streak = 0
     failures: List[Dict[str, Any]] = []
@@ -1732,16 +1794,10 @@ def discover_cluster_ids(
     out_path.write_text("\n".join(sorted_ids) + ("\n" if sorted_ids else ""), encoding="utf-8")
 
     if not failures and sorted_ids and flag_out:
-        flag_out.parent.mkdir(parents=True, exist_ok=True)
-        flag_out.write_text(
-            "READY=1\n"
-            f"CLUSTERS={len(sorted_ids)}\n"
-            f"DATASET_ID={dataset_id}\n",
-            encoding="utf-8",
-        )
+        write_cleaning_ready_flag(flag_out, cluster_count=len(sorted_ids), dataset_id=dataset_id)
 
     json_dump(
-        out_path.parent / "discover_summary.json",
+        summary_path,
         {
             "dataset_id": dataset_id,
             "cluster_ids_file": str(out_path),
@@ -1754,7 +1810,10 @@ def discover_cluster_ids(
         },
     )
     if failures:
-        print("Discovery incomplete. See failure manifest for details.", file=sys.stderr)
+        print(
+            f"Discovery incomplete. See: {summary_path} and {failures_path}",
+            file=sys.stderr,
+        )
         return 4
     print(f"Wrote {len(sorted_ids)} unique cluster_ids to: {out_path}")
     if flag_out:
@@ -2157,10 +2216,89 @@ def export_cluster_metadata(args: argparse.Namespace) -> int:
         resume = True
 
 
+def cleanup_generated_outputs(args: argparse.Namespace) -> int:
+    root = Path(args.root)
+    discover_dir = Path(args.discover_dir) if args.discover_dir else (root / "discover")
+    removed: List[str] = []
+    missing: List[str] = []
+
+    def remove_file(path: Path) -> None:
+        if path.exists():
+            if args.dry_run:
+                removed.append(f"[dry-run] file {path}")
+            else:
+                path.unlink()
+                removed.append(f"file {path}")
+        else:
+            missing.append(str(path))
+
+    def remove_dir(path: Path) -> None:
+        if path.exists():
+            if args.dry_run:
+                removed.append(f"[dry-run] dir  {path}")
+            else:
+                shutil.rmtree(path, ignore_errors=False)
+                removed.append(f"dir  {path}")
+        else:
+            missing.append(str(path))
+
+    if not root.exists():
+        print(f"Root path does not exist: {root}", file=sys.stderr)
+        return 2
+
+    if not args.keep_cluster_ids:
+        for path in sorted(root.glob("cluster_ids*.txt")):
+            if path.name == "cluster_ids.example.txt":
+                continue
+            remove_file(path)
+
+    if not args.keep_discover:
+        remove_dir(discover_dir)
+        # Backward compatibility: remove legacy flat discover files if present.
+        for legacy_name in ("discover_checkpoint.json", "discover_failures.json", "discover_summary.json"):
+            remove_file(root / legacy_name)
+
+    if not args.keep_pycache:
+        for cache_dir in sorted(root.rglob("__pycache__")):
+            remove_dir(cache_dir)
+        for pyc in sorted(root.rglob("*.pyc")):
+            remove_file(pyc)
+
+    if args.remove_flag:
+        remove_file(Path(args.flag_out))
+
+    print("Cleanup complete.")
+    if removed:
+        print(f"Removed entries ({len(removed)}):")
+        for line in removed:
+            print(f"  - {line}")
+    else:
+        print("No generated files matched cleanup rules.")
+    if missing and args.verbose:
+        print(f"Missing entries skipped ({len(missing)}).", file=sys.stderr)
+    return 0
+
+
+def purge_pycache_tree(root: Path) -> None:
+    if not root.exists():
+        return
+    for cache_dir in sorted(root.rglob("__pycache__")):
+        try:
+            shutil.rmtree(cache_dir, ignore_errors=True)
+        except Exception:
+            continue
+    for pyc in sorted(root.rglob("*.pyc")):
+        try:
+            pyc.unlink()
+        except Exception:
+            continue
+
+
 def run_all(args: argparse.Namespace) -> int:
     out_path = Path(args.out)
-    discover_checkpoint = out_path.parent / "discover_checkpoint.json"
-    discover_failures = out_path.parent / "discover_failures.json"
+    discover_paths = discover_artifact_paths(resolve_discover_dir(out_path, args.discover_dir))
+    discover_checkpoint = discover_paths["checkpoint"]
+    discover_failures = discover_paths["failures"]
 
     rc = discover_cluster_ids_with_strategy(
         dataset_id=args.dataset_id,
@@ -2236,7 +2374,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Visual Layer dataset ID. Optional if VL_DATASET_ID/dataset_id is set in .env.",
     )
     discover.add_argument("--out", default="clean_imagenet1k/cluster_ids.txt")
-    discover.add_argument("--flag-out", default="CLEANING_READY.flag")
+    discover.add_argument(
+        "--flag-out",
+        default="CLEANING_READY.flag",
+        help=(
+            "Write READY handoff flag when discovery succeeds. "
+            "Format: READY=1, CLUSTERS=<count>, DATASET_ID=<id>."
+        ),
+    )
+    discover.add_argument(
+        "--discover-dir",
+        default=None,
+        help="Directory for discovery artifacts (checkpoint/failures/summary/debug).",
+    )
     discover.add_argument("--entity-type", default="IMAGES")
     discover.add_argument("--threshold", type=int, default=1)
     discover.add_argument("--max-pages", type=int, default=5000)
@@ -2327,7 +2477,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Visual Layer dataset ID. Optional if VL_DATASET_ID/dataset_id is set in .env.",
     )
     run_all_cmd.add_argument("--out", default="clean_imagenet1k/cluster_ids.txt")
-    run_all_cmd.add_argument("--flag-out", default="CLEANING_READY.flag")
+    run_all_cmd.add_argument(
+        "--flag-out",
+        default="CLEANING_READY.flag",
+        help=(
+            "Write READY handoff flag when discovery succeeds. "
+            "Format: READY=1, CLUSTERS=<count>, DATASET_ID=<id>."
+        ),
+    )
+    run_all_cmd.add_argument(
+        "--discover-dir",
+        default=None,
+        help="Directory for discovery artifacts (checkpoint/failures/summary/debug).",
+    )
     run_all_cmd.add_argument("--output-root", default="data/cluster_exports_from_vl")
     run_all_cmd.add_argument("--entity-type", default="IMAGES")
     run_all_cmd.add_argument("--threshold", type=int, default=1)
@@ -2388,6 +2550,40 @@ def build_parser() -> argparse.ArgumentParser:
     run_all_cmd.add_argument("--max-auto-resume-cycles", type=int, default=20)
     run_all_cmd.add_argument("--auto-resume-wait-seconds", type=int, default=60)
 
+    cleanup = subparsers.add_parser(
+        "cleanup-generated",
+        help="Remove generated discovery/cluster output files and __pycache__ entries.",
+    )
+    cleanup.add_argument("--root", default="clean_imagenet1k")
+    cleanup.add_argument(
+        "--discover-dir",
+        default=None,
+        help="Discovery artifacts directory. Defaults to <root>/discover.",
+    )
+    cleanup.add_argument(
+        "--keep-cluster-ids",
+        action="store_true",
+        help="Do not remove cluster_ids*.txt (except cluster_ids.example.txt, which is always preserved).",
+    )
+    cleanup.add_argument(
+        "--keep-discover",
+        action="store_true",
+        help="Do not remove discovery artifacts directory/files.",
+    )
+    cleanup.add_argument(
+        "--keep-pycache",
+        action="store_true",
+        help="Do not remove __pycache__ folders and *.pyc files under --root.",
+    )
+    cleanup.add_argument(
+        "--remove-flag",
+        action="store_true",
+        help="Also remove the READY flag file path passed via --flag-out.",
+    )
+    cleanup.add_argument("--flag-out", default="CLEANING_READY.flag")
+    cleanup.add_argument("--dry-run", action="store_true")
+    cleanup.add_argument("--verbose", action="store_true")
+
     return parser
 
 
@@ -2395,7 +2591,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = build_parser()
     raw = list(argv if argv is not None else sys.argv[1:])
 
-    commands = {"discover-cluster-ids", "export-cluster-metadata", "run-all"}
+    commands = {"discover-cluster-ids", "export-cluster-metadata", "run-all", "cleanup-generated"}
     if raw and raw[0] not in commands and raw[0] not in ("-h", "--help"):
         # Backward-compat mode: old invocation without subcommand behaves as discovery.
         raw = ["discover-cluster-ids", *raw]
@@ -2407,43 +2603,51 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
-    args.dataset_id = resolve_dataset_id(getattr(args, "dataset_id", None))
-    if args.command == "discover-cluster-ids":
-        out_path = Path(args.out)
-        return discover_cluster_ids_with_strategy(
-            dataset_id=args.dataset_id,
-            out_path=out_path,
-            flag_out=Path(args.flag_out) if args.flag_out else None,
-            discover_method=args.discover_method,
-            entity_type=args.entity_type,
-            threshold=args.threshold,
-            max_pages=args.max_pages,
-            stop_after_empty_pages=args.stop_after_empty_pages,
-            timeout_s=args.timeout,
-            max_retries=args.max_retries,
-            retry_base_s=args.retry_base_seconds,
-            retry_max_s=args.retry_max_seconds,
-            cooldown_on_429_s=args.cooldown_on_429_seconds,
-            checkpoint_path=out_path.parent / "discover_checkpoint.json",
-            failures_path=out_path.parent / "discover_failures.json",
-            ui_list_url=args.ui_list_url,
-            ui_cluster_selector=args.ui_cluster_selector,
-            ui_next_selector=args.ui_next_selector,
-            ui_max_pages=args.ui_max_pages,
-            ui_max_clusters_per_page=args.ui_max_clusters_per_page,
-            ui_timeout_ms=args.ui_timeout_ms,
-            ui_headful=args.ui_headful,
-            ui_storage_state=args.ui_storage_state,
-            ui_save_storage_state=args.ui_save_storage_state,
-            ui_manual_login=args.ui_manual_login,
-            ui_force_click=args.ui_force_click,
-        )
-    if args.command == "export-cluster-metadata":
-        return export_cluster_metadata(args)
-    if args.command == "run-all":
-        return run_all(args)
-    print(f"Unknown command: {args.command}", file=sys.stderr)
-    return 1
+    pycache_root = Path(__file__).resolve().parent
+    try:
+        if args.command == "cleanup-generated":
+            return cleanup_generated_outputs(args)
+
+        args.dataset_id = resolve_dataset_id(getattr(args, "dataset_id", None))
+        if args.command == "discover-cluster-ids":
+            out_path = Path(args.out)
+            discover_paths = discover_artifact_paths(resolve_discover_dir(out_path, args.discover_dir))
+            return discover_cluster_ids_with_strategy(
+                dataset_id=args.dataset_id,
+                out_path=out_path,
+                flag_out=Path(args.flag_out) if args.flag_out else None,
+                discover_method=args.discover_method,
+                entity_type=args.entity_type,
+                threshold=args.threshold,
+                max_pages=args.max_pages,
+                stop_after_empty_pages=args.stop_after_empty_pages,
+                timeout_s=args.timeout,
+                max_retries=args.max_retries,
+                retry_base_s=args.retry_base_seconds,
+                retry_max_s=args.retry_max_seconds,
+                cooldown_on_429_s=args.cooldown_on_429_seconds,
+                checkpoint_path=discover_paths["checkpoint"],
+                failures_path=discover_paths["failures"],
+                ui_list_url=args.ui_list_url,
+                ui_cluster_selector=args.ui_cluster_selector,
+                ui_next_selector=args.ui_next_selector,
+                ui_max_pages=args.ui_max_pages,
+                ui_max_clusters_per_page=args.ui_max_clusters_per_page,
+                ui_timeout_ms=args.ui_timeout_ms,
+                ui_headful=args.ui_headful,
+                ui_storage_state=args.ui_storage_state,
+                ui_save_storage_state=args.ui_save_storage_state,
+                ui_manual_login=args.ui_manual_login,
+                ui_force_click=args.ui_force_click,
+            )
+        if args.command == "export-cluster-metadata":
+            return export_cluster_metadata(args)
+        if args.command == "run-all":
+            return run_all(args)
+        print(f"Unknown command: {args.command}", file=sys.stderr)
+        return 1
+    finally:
+        purge_pycache_tree(pycache_root)
 
 
 if __name__ == "__main__":
