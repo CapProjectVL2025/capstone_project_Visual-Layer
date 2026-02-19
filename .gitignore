@@ -1,6 +1,7 @@
 # Environment variables
 .env
-
+clean_imagenet1k/*.storage_state.json
+clean_imagenet1k/.vl_storage_state.json
 .env
 *.env
 **/*.env

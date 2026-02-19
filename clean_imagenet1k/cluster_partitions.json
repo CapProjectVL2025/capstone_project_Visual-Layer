@@ -1,0 +1,12 @@
+{
+  "partitions": [
+    {
+      "name": "cluster_example_001",
+      "extra_params": {
+        "entity_type": "IMAGES",
+        "threshold": "1",
+        "cluster_id": "36664ab3-9261-4ec6-a44a-7607f3cf5bf9"
+      }
+    }
+  ]
+}

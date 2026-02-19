@@ -7,10 +7,11 @@ This version includes enhanced error handling for export rejections.
 """
 
 import os
+import random
 import time
 import requests
 import jwt
-from typing import Dict, Optional, Any
+from typing import Dict, Any
 from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
@@ -29,13 +30,13 @@ class VisualLayerAPIClient:
         )
         self.token_expiry_minutes = token_expiry_minutes
         
-        # Load credentials from environment
-        self.api_key = api_key or os.environ.get('api_key')
-        self.api_secret = api_secret or os.environ.get('api_secret')
+        # Support both env var naming styles used in this project.
+        self.api_key = api_key or os.environ.get('VL_API_KEY') or os.environ.get('api_key')
+        self.api_secret = api_secret or os.environ.get('VL_API_SECRET') or os.environ.get('api_secret')
         
         if not self.api_key or not self.api_secret:
             raise ValueError(
-                "API credentials required. Set api_key and api_secret environment variables.\n"
+                "API credentials required. Set VL_API_KEY/VL_API_SECRET (or api_key/api_secret).\n"
                 "Get credentials: https://app.visual-layer.com/api/v1/api_credentials"
             )
         
@@ -97,13 +98,65 @@ class VisualLayerAPIClient:
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json"
         }
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Dict[str, str] = None,
+        params: Dict[str, Any] = None,
+        timeout: int = 30,
+        accept: str = None,
+        retries: int = 5,
+    ) -> requests.Response:
+        """HTTP wrapper with token refresh and retry/backoff for transient failures."""
+        forced_refresh_done = False
+        merged_headers = {**self.get_headers(), **(headers or {})}
+        if accept:
+            merged_headers["Accept"] = accept
+
+        for attempt in range(retries):
+            try:
+                response = requests.request(
+                    method=method,
+                    url=url,
+                    headers=merged_headers,
+                    params=params,
+                    timeout=timeout,
+                )
+
+                if response.status_code == 401 and not forced_refresh_done:
+                    print("⚠️  401 received, forcing token refresh and retrying once...")
+                    self._generate_jwt_token()
+                    merged_headers = {**self.get_headers(), **(headers or {})}
+                    if accept:
+                        merged_headers["Accept"] = accept
+                    forced_refresh_done = True
+                    continue
+
+                if response.status_code in (429, 500, 502, 503, 504):
+                    if attempt < retries - 1:
+                        sleep_s = min(60, (2 ** attempt) + random.uniform(0.0, 1.0))
+                        print(f"⚠️  HTTP {response.status_code}; retrying in {sleep_s:.1f}s...")
+                        time.sleep(sleep_s)
+                        continue
+                return response
+            except requests.exceptions.RequestException as e:
+                if attempt >= retries - 1:
+                    raise
+                sleep_s = min(60, (2 ** attempt) + random.uniform(0.0, 1.0))
+                print(f"⚠️  Network error: {e}. Retrying in {sleep_s:.1f}s...")
+                time.sleep(sleep_s)
+
+        raise RuntimeError("Unexpected request retry state")
     
     def test_connection(self, dataset_id: str) -> bool:
         """Test API connection by fetching dataset info."""
         url = f"{self.base_url}/api/v1/dataset/{dataset_id}"
         
         try:
-            response = requests.get(url, headers=self.get_headers(), timeout=30)
+            response = self._request("GET", url, timeout=30, retries=3)
             
             if response.status_code == 200:
                 data = response.json()
@@ -126,9 +179,14 @@ class VisualLayerAPIClient:
             print(f"✗ Connection error: {str(e)}")
             return False
     
-    def export_dataset(self, dataset_id: str, format: str = 'json',
-                      include_images: bool = False, 
-                      file_name: str = 'export.zip') -> str:
+    def export_dataset(
+        self,
+        dataset_id: str,
+        format: str = 'json',
+        include_images: bool = False,
+        file_name: str = 'export.zip',
+        extra_params: Dict[str, Any] = None,
+    ) -> str:
         """
         Start dataset export from Visual Layer.
         
@@ -140,17 +198,19 @@ class VisualLayerAPIClient:
         print(f"  File name: {file_name}")
         
         try:
-            response = requests.get(
+            params = {
+                "file_name": file_name,
+                "export_format": format,
+                "include_images": str(include_images).lower()
+            }
+            if extra_params:
+                params.update(extra_params)
+
+            response = self._request(
+                "GET",
                 f"{self.base_url}/api/v1/dataset/{dataset_id}/export_context_async",
-                headers={
-                    **self.get_headers(),
-                    "Accept": "application/json, text/plain, */*"
-                },
-                params={
-                    "file_name": file_name,
-                    "export_format": format,
-                    "include_images": str(include_images).lower()
-                },
+                accept="application/json, text/plain, */*",
+                params=params,
                 timeout=30
             )
             
@@ -196,12 +256,10 @@ class VisualLayerAPIClient:
     
     def get_export_status(self, dataset_id: str, export_task_id: str) -> Dict[str, Any]:
         """Check export task status."""
-        response = requests.get(
+        response = self._request(
+            "GET",
             f"{self.base_url}/api/v1/dataset/{dataset_id}/export_status",
-            headers={
-                **self.get_headers(),
-                "Accept": "application/json, text/plain, */*"
-            },
+            accept="application/json, text/plain, */*",
             params={"export_task_id": export_task_id},
             timeout=30
         )
@@ -254,8 +312,13 @@ class VisualLayerAPIClient:
                     print(f"Full response: {status_data}")
                     raise Exception(f"Export completed but no download URL found. Response: {status_data}")
                 
-                elif status == 'FAILED':
-                    error = status_data.get('error', status_data.get('message', 'Unknown error'))
+                elif status in ['FAILED', 'REJECTED', 'CANCELED', 'CANCELLED']:
+                    error = (
+                        status_data.get('result_message')
+                        or status_data.get('error')
+                        or status_data.get('message')
+                        or 'Unknown error'
+                    )
                     print(f"\n❌ Export failed")
                     print(f"Error: {error}")
                     print(f"Full response: {status_data}")
@@ -285,22 +348,32 @@ class VisualLayerAPIClient:
     def download_export(self, download_url: str, output_path: str):
         """Download export ZIP file."""
         print(f"⬇️  Downloading export to {output_path}...")
-        
-        response = requests.get(download_url, stream=True, timeout=300)
-        response.raise_for_status()
-        
-        total_size = int(response.headers.get('content-length', 0))
-        downloaded = 0
-        
-        with open(output_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                downloaded += len(chunk)
-                f.write(chunk)
-                
-                if total_size > 0:
-                    percent = (downloaded / total_size) * 100
-                    mb = downloaded / (1024 * 1024)
-                    total_mb = total_size / (1024 * 1024)
-                    print(f"  ⬇️  {percent:.1f}% ({mb:.1f}/{total_mb:.1f} MB)", end='\r')
-        
-        print(f"\n  ✓ Download complete ({downloaded / (1024**2):.1f} MB)")
+
+        retries = 5
+        for attempt in range(retries):
+            try:
+                response = requests.get(download_url, stream=True, timeout=300)
+                response.raise_for_status()
+
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded = 0
+
+                with open(output_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        downloaded += len(chunk)
+                        f.write(chunk)
+
+                        if total_size > 0:
+                            percent = (downloaded / total_size) * 100
+                            mb = downloaded / (1024 * 1024)
+                            total_mb = total_size / (1024 * 1024)
+                            print(f"  ⬇️  {percent:.1f}% ({mb:.1f}/{total_mb:.1f} MB)", end='\r')
+
+                print(f"\n  ✓ Download complete ({downloaded / (1024**2):.1f} MB)")
+                return
+            except requests.exceptions.RequestException as e:
+                if attempt >= retries - 1:
+                    raise
+                sleep_s = min(60, (2 ** attempt) + random.uniform(0.0, 1.0))
+                print(f"⚠️  Download error: {e}. Retrying in {sleep_s:.1f}s...")
+                time.sleep(sleep_s)

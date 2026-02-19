@@ -82,6 +82,8 @@ Examples:
                        help='Skip downloading images (metadata only)')
     parser.add_argument('--vm-path', default=None,
                        help='Copy final ZIP to VM path (e.g., /mnt/data/clean_imagenet)')
+    parser.add_argument('--dry-run-auth', action='store_true',
+                       help='Validate auth and dataset access only, then exit')
     
     return parser.parse_args()
 
@@ -91,6 +93,23 @@ def print_header(title):
     print("\n" + "=" * 70)
     print(title)
     print("=" * 70)
+
+
+def cleanup_python_cache(script_dir: Path):
+    """Remove Python cache artifacts created during execution."""
+    removed = 0
+    for cache_dir in script_dir.rglob("__pycache__"):
+        if cache_dir.is_dir():
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            removed += 1
+
+    for pyc_file in script_dir.rglob("*.pyc"):
+        if pyc_file.is_file():
+            pyc_file.unlink(missing_ok=True)
+            removed += 1
+
+    if removed > 0:
+        print(f"\n🧹 Cleaned Python cache artifacts: {removed}")
 
 
 def load_policy(policy_path):
@@ -131,7 +150,7 @@ def export_from_visual_layer(client, dataset_id, output_dir, include_images):
     download_url = client.wait_for_export(dataset_id, export_task_id)
     
     # Download
-    export_zip = output_dir / "imagenet_export"
+    export_zip = output_dir / "imagenet_export.zip"
     client.download_export(download_url, str(export_zip))
     
     # Extract
@@ -159,7 +178,13 @@ def parse_metadata(extract_dir):
     metadata_file = metadata_files[0]
     print(f"📖 Loading: {metadata_file.name}")
     
-    df = pd.read_json(metadata_file, lines=True)
+    # VL exports metadata as .json; handle both JSONL and JSON array/object.
+    try:
+        df = pd.read_json(metadata_file, lines=True)
+        if 'metadata_items' not in df.columns and len(df) <= 1:
+            raise ValueError("Likely non-JSONL JSON")
+    except Exception:
+        df = pd.read_json(metadata_file, lines=False)
     print(f"  ✓ Loaded {len(df):,} images")
     
     # Check for required columns
@@ -546,6 +571,7 @@ def main():
     """Main execution function."""
     global args
     args = parse_args()
+    script_dir = Path(__file__).resolve().parent
     
     print("=" * 70)
     print("ImageNet-1K Dataset Cleaning with Visual Layer")
@@ -555,6 +581,7 @@ def main():
     print(f"Output: {args.output}")
     print(f"Export: {args.export}")
     print(f"Include images: {not args.no_images}")
+    print(f"Dry-run auth: {args.dry_run_auth}")
     print("=" * 70)
     
     try:
@@ -570,6 +597,12 @@ def main():
             print("  2. VL_API_KEY and VL_API_SECRET are set")
             print("  3. You have access to this dataset")
             return 1
+
+        if args.dry_run_auth:
+            print("\n✅ Dry-run auth passed")
+            print("  JWT generation and dataset connectivity are valid.")
+            print("  Skipping policy load, export, parsing, and cleaning.")
+            return 0
         
         # Load policy
         policy = load_policy(args.policy)
@@ -637,6 +670,8 @@ def main():
         import traceback
         traceback.print_exc()
         return 1
+    finally:
+        cleanup_python_cache(script_dir)
 
 
 if __name__ == '__main__':
