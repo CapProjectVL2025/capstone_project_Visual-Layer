@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Environment variables
 .env
 *.env
@@ -16,14 +15,19 @@ clean_imagenet1k/cluster_ids*.txt
 !clean_imagenet1k/cluster_ids.example.txt
 CLEANING_READY.flag
 
+# Generated run artifacts
+vl_data/
+data/cluster_exports_*/
+data/experiments/
+*.log
+
 # Python cache
 __pycache__/
+**/__pycache__/
 *.pyc
-=======
 files/
 .DS_Store
-alec/__pycache__
-alec/coco_random
+alec/__pycache__/
+alec/coco_random/
 alec/embeddings.npy
 alec/labels/labels_clean.csv
->>>>>>> 42331cf08ad883fc0dcb28f787f39a8fa8dfaee9
