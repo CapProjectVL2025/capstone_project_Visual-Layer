@@ -105,7 +105,7 @@ def main():
     ap.add_argument("--embeddings-dir", type=str, default="embeddings")
     ap.add_argument("--out-npy", type=str, default="alec/embeddings.npy")
     ap.add_argument("--out-labels", type=str, default="alec/labels_clean.csv")
-    ap.add_argument("--max-rows", type=int, default=10000, help="Cap rows for TSNE friendliness")
+    ap.add_argument("--max-rows", type=int, default=0, help="Cap rows for TSNE friendliness (0 = no cap)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--id-col", type=str, default="", help="Optional override")
     ap.add_argument("--path-col", type=str, default="", help="Optional override")
@@ -163,7 +163,7 @@ def main():
 
     # Deterministic subset: take first max_rows
     df = df.reset_index(drop=True)
-    if len(df) > args.max_rows:
+    if args.max_rows > 0 and len(df) > args.max_rows:
         df = df.iloc[:args.max_rows].reset_index(drop=True)
 
     # Resolve paths and load embeddings

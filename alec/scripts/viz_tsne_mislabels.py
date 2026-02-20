@@ -30,6 +30,10 @@ def find_existing_upwards(rel_path: str, start_dir: Path, max_up: int = 5) -> Pa
 
 def resolve_input_path(raw_path: str, cwd: Path, max_up: int = 5) -> Path:
     p = Path(raw_path)
+    if base_dir is not None and not p.is_absolute():
+        cand = (base_dir / p).resolve()
+        if cand.exists():
+            return cand
     if p.exists():
         return p.resolve()
     found = find_existing_upwards(raw_path, cwd, max_up=max_up)
@@ -40,8 +44,9 @@ def resolve_input_path(raw_path: str, cwd: Path, max_up: int = 5) -> Path:
 
 def load_inputs(embeddings_path: str, labels_path: str, label_col: str, max_up: int):
     cwd = Path.cwd()
-    emb_path = resolve_input_path(embeddings_path, cwd=cwd, max_up=max_up)
-    labels_path = resolve_input_path(labels_path, cwd=cwd, max_up=max_up)
+    repo_root = Path(__file__).resolve().parents[1]
+    emb_path = resolve_input_path(embeddings_path, cwd=cwd, max_up=max_up, base_dir=repo_root)
+    labels_path = resolve_input_path(labels_path, cwd=cwd, max_up=max_up, base_dir=repo_root)
 
     X = np.load(str(emb_path))
     df = pd.read_csv(str(labels_path))
@@ -61,7 +66,7 @@ def load_noisy_labels(
     keep: np.ndarray,
     max_up: int,
 ):
-    path = resolve_input_path(noisy_path, Path.cwd(), max_up=max_up)
+    path = resolve_input_path(noisy_path, Path.cwd(), max_up=max_up, base_dir=Path(__file__).resolve().parents[1])
     df_noisy = pd.read_csv(str(path))
     if label_col not in df_noisy.columns:
         raise ValueError(f"Missing label column '{label_col}' in noisy CSV: {path}")
