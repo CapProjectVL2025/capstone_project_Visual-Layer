@@ -26,6 +26,7 @@ from connect_vl_api_f import VisualLayerAPIClient
 load_dotenv()
 
 INTERNAL_COLUMNS = {"__source_export_file", "__source_partition"}
+IMAGENET1K_EXPECTED_MEDIA_ITEMS = 1_331_167
 
 
 def print_header(title: str):
@@ -180,8 +181,11 @@ def parse_args() -> argparse.Namespace:
     filt.add_argument(
         "--expected-total-media-items",
         type=int,
-        default=None,
-        help="Optional expected full dataset size; run fails if merged unique count does not match",
+        default=IMAGENET1K_EXPECTED_MEDIA_ITEMS,
+        help=(
+            "Expected full dataset size used for coverage reporting "
+            f"(default: {IMAGENET1K_EXPECTED_MEDIA_ITEMS:,})."
+        ),
     )
     filt.add_argument(
         "--require-full-coverage",
@@ -715,23 +719,50 @@ def validate_merged_coverage(
     merged_df: pd.DataFrame,
     expected_total_media_items: Optional[int],
     require_full_coverage: bool,
-):
-    if expected_total_media_items is None:
-        return
-
+)-> Dict[str, Any]:
     merged_count = int(len(merged_df))
-    if merged_count == int(expected_total_media_items):
-        print(f"Coverage check passed: merged={merged_count:,} expected={expected_total_media_items:,}")
-        return
+    if expected_total_media_items is None:
+        return {
+            "expected_total_media_items": None,
+            "merged_total_media_items": merged_count,
+            "difference_signed": None,
+            "difference_absolute": None,
+            "missing_from_expected": None,
+            "excess_over_expected": None,
+        }
+
+    expected = int(expected_total_media_items)
+    diff_signed = merged_count - expected
+    diff_abs = abs(diff_signed)
+    missing = max(0, expected - merged_count)
+    excess = max(0, merged_count - expected)
+
+    coverage = {
+        "expected_total_media_items": expected,
+        "merged_total_media_items": merged_count,
+        "difference_signed": diff_signed,
+        "difference_absolute": diff_abs,
+        "missing_from_expected": missing,
+        "excess_over_expected": excess,
+    }
+
+    if diff_signed == 0:
+        print(
+            "Coverage check passed: "
+            f"merged={merged_count:,}, expected={expected:,}, difference=0"
+        )
+        return coverage
 
     msg = (
         "Coverage check mismatch: "
-        f"merged={merged_count:,}, expected={expected_total_media_items:,}. "
+        f"merged={merged_count:,}, expected={expected:,}, "
+        f"missing={missing:,}, excess={excess:,}, absolute_difference={diff_abs:,}. "
         "Your partition exports may be incomplete or overlapping."
     )
     if require_full_coverage:
         raise RuntimeError(msg)
     print(f"WARNING: {msg}")
+    return coverage
 
 
 def apply_cleaning_policy(df: pd.DataFrame, policy: Dict[str, Any]):
@@ -965,7 +996,7 @@ def run_partition(
     # 1) Merge all partition exports into raw_merged_metadata.json
     # 2) Validate merged coverage
     # 3) Apply cleaning policy to produce cleaned_imagenet1k.json
-    validate_merged_coverage(
+    coverage = validate_merged_coverage(
         merged_df=merged_df,
         expected_total_media_items=expected_total_media_items,
         require_full_coverage=require_full_coverage,
@@ -992,9 +1023,20 @@ def run_partition(
         "total": int(len(merged_df)),
         "kept": int(len(keep_df)),
         "dropped": int(len(drop_df)),
+        "coverage_check": coverage,
         "raw_merged_metadata_json": str(out_dir / "raw_merged_metadata.json"),
         "cleaned_imagenet1k_json": str(out_dir / "cleaned_imagenet1k.json"),
     }
+    expected_total = coverage.get("expected_total_media_items")
+    if expected_total is not None:
+        print(
+            "Coverage summary: "
+            f"expected={expected_total:,}, "
+            f"merged={int(coverage['merged_total_media_items']):,}, "
+            f"missing={int(coverage['missing_from_expected']):,}, "
+            f"excess={int(coverage['excess_over_expected']):,}, "
+            f"difference={int(coverage['difference_signed']):+,}"
+        )
     print(f"Completed {partition_name}: kept={result['kept']:,}, dropped={result['dropped']:,}")
     return result
 

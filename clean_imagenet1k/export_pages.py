@@ -48,6 +48,10 @@ CLUSTER_QUERY_UUID_RE = re.compile(
     r"(?:[?&](?:cluster_id|clusterId)=)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[&#]|$)",
     re.IGNORECASE,
 )
+IMAGE_PATH_UUID_RE = re.compile(
+    r"/data/image/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[/?#]|$)",
+    re.IGNORECASE,
+)
 TRANSIENT_HTTP = {429, 500, 502, 503, 504}
 TERMINAL_EXPORT_FAILURES = {"FAILED", "REJECTED", "CANCELED", "CANCELLED"}
 TOO_LARGE_HINTS = ("exceeds threshold", "entities", "rejected")
@@ -318,6 +322,17 @@ def extract_cluster_uuid_from_text(text: str) -> Optional[str]:
     return None
 
 
+def extract_image_uuid_from_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+    raw = str(text)
+    match = IMAGE_PATH_UUID_RE.search(raw)
+    if match:
+        value = match.group(1).lower()
+        return value if UUID_RE.match(value) else None
+    return None
+
+
 def extract_uuid_excluding(text: str, blocked_uuid: Optional[str]) -> Optional[str]:
     if not text:
         return None
@@ -333,12 +348,77 @@ def has_cluster_ids_file_values(path: Path) -> bool:
     if not path.exists():
         return False
     for raw in path.read_text(encoding="utf-8").splitlines():
-        value = raw.strip()
+        value = raw.strip().lower()
         if not value or value.startswith("#"):
+            continue
+        if value.startswith("cluster:"):
+            value = value.split(":", 1)[1].strip()
+        elif value.startswith("image:"):
             continue
         if UUID_RE.match(value):
             return True
     return False
+
+
+def read_ui_discovered_ids_lenient(path: Path) -> Tuple[Set[str], Set[str]]:
+    cluster_values: Set[str] = set()
+    image_values: Set[str] = set()
+    if not path.exists():
+        return cluster_values, image_values
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        value = raw.strip().lower()
+        if not value or value.startswith("#"):
+            continue
+        if value.startswith("cluster:"):
+            candidate = value.split(":", 1)[1].strip()
+            if candidate and UUID_RE.match(candidate):
+                cluster_values.add(candidate)
+            continue
+        if value.startswith("image:"):
+            candidate = value.split(":", 1)[1].strip()
+            if candidate and UUID_RE.match(candidate):
+                image_values.add(candidate)
+            continue
+        if UUID_RE.match(value):
+            cluster_values.add(value)
+    return cluster_values, image_values
+
+
+def read_cluster_ids_lenient(path: Path) -> Set[str]:
+    values, _ = read_ui_discovered_ids_lenient(path)
+    return values
+
+
+def build_ui_discovered_lines(
+    cluster_ids: Set[str],
+    image_ids: Set[str],
+    label_output: bool,
+) -> List[str]:
+    if not label_output:
+        return sorted(cluster_ids)
+    lines = [f"cluster:{value}" for value in sorted(cluster_ids)]
+    lines.extend(f"image:{value}" for value in sorted(image_ids))
+    return lines
+
+
+def collect_image_ids_from_ui_page(page: Any, blocked_uuid: Optional[str]) -> Set[str]:
+    blocked = (blocked_uuid or "").strip().lower()
+    image_ids: Set[str] = set()
+    direct = extract_image_uuid_from_text(getattr(page, "url", ""))
+    if direct and direct != blocked:
+        image_ids.add(direct)
+    hrefs: List[str] = []
+    try:
+        raw_hrefs = page.eval_on_selector_all("a[href]", "els => els.map(el => el.href)")
+        if isinstance(raw_hrefs, list):
+            hrefs = [str(v) for v in raw_hrefs if isinstance(v, str)]
+    except Exception:
+        hrefs = []
+    for href in hrefs:
+        image_id = extract_image_uuid_from_text(href)
+        if image_id and image_id != blocked:
+            image_ids.add(image_id)
+    return image_ids
 
 
 def get_query_int(url: str, key: str, default: int) -> int:
@@ -406,19 +486,160 @@ def discover_cluster_ids_via_ui(
     ui_save_storage_state: Optional[str],
     ui_manual_login: bool,
     ui_force_click: bool,
+    ui_fallback_to_images_when_no_clusters: bool,
+    ui_label_output: bool,
+    ui_stop_after_empty_pages: int,
 ) -> int:
     failures: List[Dict[str, Any]] = []
     cluster_ids: Set[str] = set()
+    image_ids: Set[str] = set()
     pages_scanned = 0
     discover_dir = checkpoint_path.parent
     summary_path = discover_dir / "discover_summary.json"
     debug_html_path = discover_dir / "ui_debug_last_page.html"
     debug_png_path = discover_dir / "ui_debug_last_page.png"
     list_url = ui_list_url or f"{vl_base_url()}/dataset/{dataset_id}/data"
-    start_page_number = max(1, get_query_int(list_url, "page", 1))
+    requested_start_page = max(1, get_query_int(list_url, "page", 1))
+    start_page_number = requested_start_page
+    ui_pages_to_scan = max(0, int(ui_max_pages))
     current_list_url = set_query_value(list_url, "page", start_page_number)
-    dataset_id_lc = str(dataset_id).strip().lower()
+    dataset_id_str = str(dataset_id).strip()
+    dataset_id_lc = dataset_id_str.lower()
     network_cluster_ids: Set[str] = set()
+    empty_stop_threshold = max(0, int(ui_stop_after_empty_pages))
+    empty_page_streak = 0
+
+    if ui_fallback_to_images_when_no_clusters and not ui_label_output:
+        ui_label_output = True
+        print(
+            "Enabled labeled output because image fallback is active.",
+            file=sys.stderr,
+        )
+    existing_cluster_ids, existing_image_ids = read_ui_discovered_ids_lenient(out_path)
+    if existing_cluster_ids:
+        cluster_ids.update(existing_cluster_ids)
+        print(
+            f"Loaded {len(existing_cluster_ids):,} existing cluster_ids from {out_path}",
+            file=sys.stderr,
+        )
+    if existing_image_ids:
+        image_ids.update(existing_image_ids)
+        if ui_label_output:
+            print(
+                f"Loaded {len(existing_image_ids):,} existing image_ids from {out_path}",
+                file=sys.stderr,
+            )
+
+    if checkpoint_path.exists():
+        try:
+            checkpoint_payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(
+                f"Could not parse discovery checkpoint {checkpoint_path}; ignoring ({exc})",
+                file=sys.stderr,
+            )
+        else:
+            cp_dataset_id = str(checkpoint_payload.get("dataset_id", "")).strip()
+            cp_mode = str(checkpoint_payload.get("discovery_mode", "")).strip().lower()
+            cp_page = parse_int(checkpoint_payload.get("current_dataset_page"), 0)
+            if cp_dataset_id and cp_dataset_id != dataset_id_str:
+                print(
+                    f"Ignoring checkpoint for dataset {cp_dataset_id} (requested {dataset_id_str})",
+                    file=sys.stderr,
+                )
+            elif cp_mode and cp_mode != "ui":
+                print(
+                    f"Ignoring non-UI discovery checkpoint mode '{cp_mode}'",
+                    file=sys.stderr,
+                )
+            elif cp_page >= requested_start_page:
+                pages_scanned = max(pages_scanned, parse_int(checkpoint_payload.get("pages_scanned"), 0))
+                pages_already_scanned = (cp_page - requested_start_page) + 1
+                start_page_number = cp_page + 1
+                ui_pages_to_scan = max(0, ui_pages_to_scan - pages_already_scanned)
+                current_list_url = set_query_value(list_url, "page", start_page_number)
+                print(
+                    "Resuming UI discovery from dataset page "
+                    f"{start_page_number} (last completed page {cp_page})",
+                    file=sys.stderr,
+                )
+
+    if ui_pages_to_scan <= 0:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        output_lines = build_ui_discovered_lines(
+            cluster_ids=cluster_ids,
+            image_ids=image_ids,
+            label_output=ui_label_output,
+        )
+        out_path.write_text(
+            "\n".join(output_lines) + ("\n" if output_lines else ""),
+            encoding="utf-8",
+        )
+        if cluster_ids and flag_out:
+            write_cleaning_ready_flag(flag_out, cluster_count=len(cluster_ids), dataset_id=dataset_id)
+        has_any_ids = bool(cluster_ids) or (
+            bool(image_ids) and bool(ui_fallback_to_images_when_no_clusters)
+        )
+        if has_any_ids:
+            print(
+                (
+                    "UI discovery page range already complete; reusing "
+                    f"{len(cluster_ids):,} cluster_ids and {len(image_ids):,} image_ids"
+                ),
+                file=sys.stderr,
+            )
+            json_dump(
+                summary_path,
+                {
+                    "dataset_id": dataset_id,
+                    "cluster_ids_file": str(out_path),
+                    "cluster_count": len(cluster_ids),
+                    "image_count": len(image_ids),
+                    "id_count_total": len(cluster_ids) + len(image_ids),
+                    "label_output": bool(ui_label_output),
+                    "image_fallback_enabled": bool(ui_fallback_to_images_when_no_clusters),
+                    "pages_successful": pages_scanned,
+                    "entity_type_used": "UI",
+                    "completed": True,
+                    "failures": [],
+                    "timestamp": now_utc_iso(),
+                },
+            )
+            return 0
+        no_ids_failure = {
+            "kind": "no_cluster_ids",
+            "status": 0,
+            "snippet": "",
+            "message": "No IDs available from resumed UI discovery state.",
+            "timestamp": now_utc_iso(),
+        }
+        json_dump(
+            summary_path,
+            {
+                "dataset_id": dataset_id,
+                "cluster_ids_file": str(out_path),
+                "cluster_count": len(cluster_ids),
+                "image_count": len(image_ids),
+                "id_count_total": len(cluster_ids) + len(image_ids),
+                "label_output": bool(ui_label_output),
+                "image_fallback_enabled": bool(ui_fallback_to_images_when_no_clusters),
+                "pages_successful": pages_scanned,
+                "entity_type_used": "UI",
+                "completed": False,
+                "failures": [no_ids_failure],
+                "timestamp": now_utc_iso(),
+            },
+        )
+        json_dump(
+            failures_path,
+            {
+                "dataset_id": dataset_id,
+                "completed": False,
+                "phase": "discover-cluster-ids-ui",
+                "failures": [no_ids_failure],
+            },
+        )
+        return 4
 
     try:
         from playwright.sync_api import sync_playwright  # type: ignore
@@ -529,7 +750,58 @@ def discover_cluster_ids_via_ui(
             next_selector = ui_next_selector.strip()
             page_index = 1
 
-            while page_index <= ui_max_pages:
+            def advance_to_next_page() -> bool:
+                nonlocal page_index, current_list_url
+                if not next_selector:
+                    if page_index >= ui_pages_to_scan:
+                        return False
+                    next_dataset_page = start_page_number + page_index
+                    next_list_url = set_query_value(current_list_url, "page", next_dataset_page)
+                    try:
+                        page.goto(next_list_url, wait_until="domcontentloaded", timeout=ui_timeout_ms)
+                        page.wait_for_timeout(900)
+                        current_list_url = next_list_url
+                        page_index += 1
+                        return True
+                    except Exception as exc:
+                        failures.append(
+                            {
+                                "kind": "ui_next_page_failed",
+                                "status": 0,
+                                "snippet": "",
+                                "message": f"Failed to navigate to next page URL '{next_list_url}': {exc}",
+                                "timestamp": now_utc_iso(),
+                            }
+                        )
+                        return False
+
+                next_button = page.locator(next_selector).first
+                if next_button.count() == 0:
+                    return False
+                disabled = next_button.get_attribute("disabled")
+                aria_disabled = next_button.get_attribute("aria-disabled")
+                class_attr = (next_button.get_attribute("class") or "").lower()
+                if disabled is not None or aria_disabled == "true" or "disabled" in class_attr:
+                    return False
+                try:
+                    next_button.click(timeout=ui_timeout_ms)
+                    page.wait_for_timeout(900)
+                    current_list_url = page.url
+                    page_index += 1
+                    return True
+                except Exception as exc:
+                    failures.append(
+                        {
+                            "kind": "ui_next_page_failed",
+                            "status": 0,
+                            "snippet": "",
+                            "message": f"Failed to navigate to next page: {exc}",
+                            "timestamp": now_utc_iso(),
+                        }
+                    )
+                    return False
+
+            while page_index <= ui_pages_to_scan:
                 pages_scanned += 1
                 page.wait_for_timeout(400)
                 dataset_page_number = start_page_number + (page_index - 1)
@@ -586,29 +858,81 @@ def discover_cluster_ids_via_ui(
                     page.wait_for_timeout(500)
 
                 if count == 0:
-                    try:
-                        debug_html_path.parent.mkdir(parents=True, exist_ok=True)
-                        debug_html_path.write_text(page.content(), encoding="utf-8")
-                    except Exception:
-                        pass
-                    try:
-                        page.screenshot(path=str(debug_png_path), full_page=True)
-                    except Exception:
-                        pass
+                    page_image_ids: Set[str] = set()
+                    if ui_fallback_to_images_when_no_clusters:
+                        page_image_ids = collect_image_ids_from_ui_page(page=page, blocked_uuid=dataset_id_lc)
+                        if page_image_ids:
+                            before_images = len(image_ids)
+                            image_ids.update(page_image_ids)
+                            new_image_ids_on_page = len(image_ids) - before_images
+                            empty_page_streak = 0
+                            json_dump(
+                                checkpoint_path,
+                                {
+                                    "dataset_id": dataset_id,
+                                    "discovery_mode": "ui",
+                                    "pages_scanned": pages_scanned,
+                                    "current_ui_page": page_index,
+                                    "current_dataset_page": dataset_page_number,
+                                    "cluster_ids_discovered": len(cluster_ids),
+                                    "image_ids_discovered": len(image_ids),
+                                    "new_ids_on_page": new_ids_on_page,
+                                    "new_image_ids_on_page": new_image_ids_on_page,
+                                    "timestamp": now_utc_iso(),
+                                },
+                            )
+                            try:
+                                out_path.parent.mkdir(parents=True, exist_ok=True)
+                                snapshot_lines = build_ui_discovered_lines(
+                                    cluster_ids=cluster_ids,
+                                    image_ids=image_ids,
+                                    label_output=ui_label_output,
+                                )
+                                out_path.write_text(
+                                    "\n".join(snapshot_lines) + ("\n" if snapshot_lines else ""),
+                                    encoding="utf-8",
+                                )
+                            except Exception as exc:
+                                failures.append(
+                                    {
+                                        "kind": "ui_cluster_ids_persist_failed",
+                                        "status": 0,
+                                        "snippet": "",
+                                        "message": f"Failed writing cluster_ids file '{out_path}': {exc}",
+                                        "timestamp": now_utc_iso(),
+                                    }
+                                )
+                                break
+                            print(
+                                (
+                                    f"[ui page {dataset_page_number}] no cluster cards; discovered "
+                                    f"{new_image_ids_on_page} new image_ids (total {len(image_ids)})"
+                                ),
+                                file=sys.stderr,
+                            )
+                            if advance_to_next_page():
+                                continue
+                            break
+                    empty_page_streak += 1
                     attempts_msg = ", ".join(f"'{sel}' -> {cnt}" for sel, cnt in selector_attempts)
-                    failures.append(
-                        {
-                            "kind": "ui_no_cluster_items",
-                            "status": 0,
-                            "snippet": "",
-                            "message": (
-                                f"No cluster UI items found on page {page_index}. "
-                                f"Selector attempts: {attempts_msg}. "
-                                f"Debug files: {debug_html_path}, {debug_png_path}"
-                            ),
-                            "timestamp": now_utc_iso(),
-                        }
+                    print(
+                        (
+                            f"[ui page {dataset_page_number}] empty page (no cluster/image ids). "
+                            f"streak={empty_page_streak}. selector_attempts: {attempts_msg}"
+                        ),
+                        file=sys.stderr,
                     )
+                    if empty_stop_threshold > 0 and empty_page_streak >= empty_stop_threshold:
+                        print(
+                            (
+                                f"Stopping UI discovery after {empty_page_streak} consecutive empty pages "
+                                f"(threshold={empty_stop_threshold})."
+                            ),
+                            file=sys.stderr,
+                        )
+                        break
+                    if advance_to_next_page():
+                        continue
                     break
 
                 card_targets: List[Dict[str, Any]] = []
@@ -879,64 +1203,41 @@ def discover_cluster_ids_via_ui(
                         "current_ui_page": page_index,
                         "current_dataset_page": dataset_page_number,
                         "cluster_ids_discovered": len(cluster_ids),
+                        "image_ids_discovered": len(image_ids),
                         "new_ids_on_page": new_ids_on_page,
                         "timestamp": now_utc_iso(),
                     },
                 )
+                try:
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    snapshot_lines = build_ui_discovered_lines(
+                        cluster_ids=cluster_ids,
+                        image_ids=image_ids,
+                        label_output=ui_label_output,
+                    )
+                    out_path.write_text(
+                        "\n".join(snapshot_lines) + ("\n" if snapshot_lines else ""),
+                        encoding="utf-8",
+                    )
+                except Exception as exc:
+                    failures.append(
+                        {
+                            "kind": "ui_cluster_ids_persist_failed",
+                            "status": 0,
+                            "snippet": "",
+                            "message": f"Failed writing cluster_ids file '{out_path}': {exc}",
+                            "timestamp": now_utc_iso(),
+                        }
+                    )
+                    break
                 print(
                     f"[ui page {dataset_page_number}] discovered {new_ids_on_page} new cluster_ids "
                     f"(total {len(cluster_ids)})",
                     file=sys.stderr,
                 )
-
-                if not next_selector:
-                    if page_index >= ui_max_pages:
-                        break
-                    next_dataset_page = start_page_number + page_index
-                    next_list_url = set_query_value(current_list_url, "page", next_dataset_page)
-                    try:
-                        page.goto(next_list_url, wait_until="domcontentloaded", timeout=ui_timeout_ms)
-                        page.wait_for_timeout(900)
-                        current_list_url = next_list_url
-                        page_index += 1
-                        continue
-                    except Exception as exc:
-                        failures.append(
-                            {
-                                "kind": "ui_next_page_failed",
-                                "status": 0,
-                                "snippet": "",
-                                "message": f"Failed to navigate to next page URL '{next_list_url}': {exc}",
-                                "timestamp": now_utc_iso(),
-                            }
-                        )
-                        break
-
-                next_button = page.locator(next_selector).first
-                if next_button.count() == 0:
+                empty_page_streak = 0
+                if not advance_to_next_page():
                     break
-                disabled = next_button.get_attribute("disabled")
-                aria_disabled = next_button.get_attribute("aria-disabled")
-                class_attr = (next_button.get_attribute("class") or "").lower()
-                if disabled is not None or aria_disabled == "true" or "disabled" in class_attr:
-                    break
-
-                try:
-                    next_button.click(timeout=ui_timeout_ms)
-                    page.wait_for_timeout(900)
-                    current_list_url = page.url
-                except Exception as exc:
-                    failures.append(
-                        {
-                            "kind": "ui_next_page_failed",
-                            "status": 0,
-                            "snippet": "",
-                            "message": f"Failed to navigate to next page: {exc}",
-                            "timestamp": now_utc_iso(),
-                        }
-                    )
-                    break
-                page_index += 1
 
             context.close()
             browser.close()
@@ -952,34 +1253,43 @@ def discover_cluster_ids_via_ui(
         )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    sorted_ids = sorted(cluster_ids)
-    out_path.write_text("\n".join(sorted_ids) + ("\n" if sorted_ids else ""), encoding="utf-8")
+    output_lines = build_ui_discovered_lines(
+        cluster_ids=cluster_ids,
+        image_ids=image_ids,
+        label_output=ui_label_output,
+    )
+    out_path.write_text("\n".join(output_lines) + ("\n" if output_lines else ""), encoding="utf-8")
+    has_any_ids = bool(cluster_ids) or (bool(image_ids) and bool(ui_fallback_to_images_when_no_clusters))
 
-    if not failures and sorted_ids and flag_out:
-        write_cleaning_ready_flag(flag_out, cluster_count=len(sorted_ids), dataset_id=dataset_id)
+    if not failures and cluster_ids and flag_out:
+        write_cleaning_ready_flag(flag_out, cluster_count=len(cluster_ids), dataset_id=dataset_id)
 
     json_dump(
         summary_path,
         {
             "dataset_id": dataset_id,
             "cluster_ids_file": str(out_path),
-            "cluster_count": len(sorted_ids),
+            "cluster_count": len(cluster_ids),
+            "image_count": len(image_ids),
+            "id_count_total": len(cluster_ids) + len(image_ids),
+            "label_output": bool(ui_label_output),
+            "image_fallback_enabled": bool(ui_fallback_to_images_when_no_clusters),
             "pages_successful": pages_scanned,
             "entity_type_used": "UI",
-            "completed": len(failures) == 0 and len(sorted_ids) > 0,
+            "completed": len(failures) == 0 and has_any_ids,
             "failures": failures,
             "timestamp": now_utc_iso(),
         },
     )
 
-    if failures or not sorted_ids:
-        if not failures and not sorted_ids:
+    if failures or not has_any_ids:
+        if not failures and not has_any_ids:
             failures.append(
                 {
                     "kind": "no_cluster_ids",
                     "status": 0,
                     "snippet": "",
-                    "message": "No cluster IDs discovered via UI automation.",
+                    "message": "No cluster/image IDs discovered via UI automation.",
                     "timestamp": now_utc_iso(),
                 }
             )
@@ -998,7 +1308,12 @@ def discover_cluster_ids_via_ui(
         )
         return 4
 
-    print(f"Wrote {len(sorted_ids)} unique cluster_ids to: {out_path}")
+    if ui_label_output:
+        print(
+            f"Wrote {len(cluster_ids)} cluster_ids and {len(image_ids)} image_ids to: {out_path}"
+        )
+    else:
+        print(f"Wrote {len(cluster_ids)} unique cluster_ids to: {out_path}")
     if flag_out:
         print(f"Wrote cleaning flag to: {flag_out}")
     return 0
@@ -1848,6 +2163,8 @@ def discover_cluster_ids_with_strategy(
     ui_save_storage_state: Optional[str],
     ui_manual_login: bool,
     ui_force_click: bool,
+    ui_fallback_to_images_when_no_clusters: bool,
+    ui_label_output: bool,
 ) -> int:
     mode = str(discover_method).lower()
     if mode not in {"api", "ui", "auto"}:
@@ -1871,6 +2188,9 @@ def discover_cluster_ids_with_strategy(
             ui_save_storage_state=ui_save_storage_state,
             ui_manual_login=ui_manual_login,
             ui_force_click=ui_force_click,
+            ui_fallback_to_images_when_no_clusters=ui_fallback_to_images_when_no_clusters,
+            ui_label_output=ui_label_output,
+            ui_stop_after_empty_pages=stop_after_empty_pages,
         )
 
     rc = discover_cluster_ids(
@@ -1916,6 +2236,9 @@ def discover_cluster_ids_with_strategy(
             ui_save_storage_state=ui_save_storage_state,
             ui_manual_login=ui_manual_login,
             ui_force_click=ui_force_click,
+            ui_fallback_to_images_when_no_clusters=ui_fallback_to_images_when_no_clusters,
+            ui_label_output=ui_label_output,
+            ui_stop_after_empty_pages=stop_after_empty_pages,
         )
     return rc
 
@@ -2327,6 +2650,8 @@ def run_all(args: argparse.Namespace) -> int:
         ui_save_storage_state=args.ui_save_storage_state,
         ui_manual_login=args.ui_manual_login,
         ui_force_click=args.ui_force_click,
+        ui_fallback_to_images_when_no_clusters=args.ui_fallback_to_images_when_no_clusters,
+        ui_label_output=args.ui_label_output,
     )
     if rc != 0:
         return rc
@@ -2390,7 +2715,7 @@ def build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--entity-type", default="IMAGES")
     discover.add_argument("--threshold", type=int, default=1)
     discover.add_argument("--max-pages", type=int, default=5000)
-    discover.add_argument("--stop-after-empty-pages", type=int, default=2)
+    discover.add_argument("--stop-after-empty-pages", type=int, default=5)
     discover.add_argument("--timeout", type=int, default=30)
     discover.add_argument("--max-retries", type=int, default=10)
     discover.add_argument("--retry-base-seconds", type=float, default=2.0)
@@ -2434,6 +2759,19 @@ def build_parser() -> argparse.ArgumentParser:
             "Force clicking each cluster UI item to resolve cluster IDs from navigation URL. "
             "Default behavior prefers parsing IDs from href without clicking."
         ),
+    )
+    discover.add_argument(
+        "--ui-fallback-to-images-when-no-clusters",
+        action="store_true",
+        help=(
+            "When a UI page has no cluster cards, collect image IDs from that page "
+            "instead of failing."
+        ),
+    )
+    discover.add_argument(
+        "--ui-label-output",
+        action="store_true",
+        help="Write --out as labeled lines: cluster:<uuid> and image:<uuid>.",
     )
 
     export = subparsers.add_parser(
@@ -2494,7 +2832,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_all_cmd.add_argument("--entity-type", default="IMAGES")
     run_all_cmd.add_argument("--threshold", type=int, default=1)
     run_all_cmd.add_argument("--max-pages", type=int, default=5000)
-    run_all_cmd.add_argument("--stop-after-empty-pages", type=int, default=2)
+    run_all_cmd.add_argument("--stop-after-empty-pages", type=int, default=5)
     run_all_cmd.add_argument("--chunk-size", type=int, default=100)
     run_all_cmd.add_argument("--sub-partition-size", type=int, default=10000)
     run_all_cmd.add_argument("--offset-param", default="offset")
@@ -2543,6 +2881,19 @@ def build_parser() -> argparse.ArgumentParser:
             "Force clicking each cluster UI item to resolve cluster IDs from navigation URL. "
             "Default behavior prefers parsing IDs from href without clicking."
         ),
+    )
+    run_all_cmd.add_argument(
+        "--ui-fallback-to-images-when-no-clusters",
+        action="store_true",
+        help=(
+            "When a UI page has no cluster cards, collect image IDs from that page "
+            "instead of failing."
+        ),
+    )
+    run_all_cmd.add_argument(
+        "--ui-label-output",
+        action="store_true",
+        help="Write --out as labeled lines: cluster:<uuid> and image:<uuid>.",
     )
     run_all_cmd.add_argument("--poll-interval-seconds", type=int, default=10)
     run_all_cmd.add_argument("--max-wait-seconds", type=int, default=3600)
@@ -2639,6 +2990,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 ui_save_storage_state=args.ui_save_storage_state,
                 ui_manual_login=args.ui_manual_login,
                 ui_force_click=args.ui_force_click,
+                ui_fallback_to_images_when_no_clusters=args.ui_fallback_to_images_when_no_clusters,
+                ui_label_output=args.ui_label_output,
             )
         if args.command == "export-cluster-metadata":
             return export_cluster_metadata(args)

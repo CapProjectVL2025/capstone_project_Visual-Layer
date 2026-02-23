@@ -49,8 +49,9 @@ load_dotenv()
 
 from pathlib import Path
 
-dotenv_path = Path('/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/.env')
-load_dotenv(dotenv_path=dotenv_path)
+repo_env = Path(__file__).resolve().parents[1] / ".env"
+if repo_env.exists():
+    load_dotenv(dotenv_path=repo_env)
 
 
 class VisualLayerAPIClient:
@@ -96,8 +97,8 @@ class VisualLayerAPIClient:
         self.token_expiry_minutes = token_expiry_minutes
         
         # Load credentials from environment
-        self.api_key = api_key or os.environ.get('api_key')
-        self.api_secret = api_secret or os.environ.get('api_secret')
+        self.api_key = api_key or os.environ.get('VL_API_KEY') or os.environ.get('api_key')
+        self.api_secret = api_secret or os.environ.get('VL_API_SECRET') or os.environ.get('api_secret')
         
         if not self.api_key or not self.api_secret:
             raise ValueError(
@@ -440,8 +441,8 @@ Get Credentials:
     print("=" * 70)
     
     # Check environment
-    api_key = os.environ.get('api_key', 'Not set')
-    api_secret = os.environ.get('api_secret', 'Not set')
+    api_key = os.environ.get('VL_API_KEY') or os.environ.get('api_key') or 'Not set'
+    api_secret = os.environ.get('VL_API_SECRET') or os.environ.get('api_secret') or 'Not set'
     
     print(f"API Key: {'Set' if len(api_key) > 20 else 'Not set'}")
     print(f"API Secret: {'Set' if len(api_secret) > 10 else 'Not set'}")

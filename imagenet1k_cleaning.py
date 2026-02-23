@@ -40,7 +40,10 @@ import yaml
 from tqdm import tqdm
 
 # Import Visual Layer API client
-from connect_vl_api_f import VisualLayerAPIClient
+try:
+    from clean_imagenet1k.connect_vl_api_f import VisualLayerAPIClient
+except ModuleNotFoundError:
+    from connect_vl_api_f import VisualLayerAPIClient
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -72,8 +75,8 @@ Examples:
     
     parser.add_argument('--dataset-id', required=True,
                        help='Visual Layer dataset ID (find in URL when viewing dataset)')
-    parser.add_argument('--policy', default='cleaning_policy.yaml',
-                       help='Path to cleaning policy YAML (default: cleaning_policy.yaml)')
+    parser.add_argument('--policy', default='clean_imagenet1k/cleaning_policy.yaml',
+                       help='Path to cleaning policy YAML (default: clean_imagenet1k/cleaning_policy.yaml)')
     parser.add_argument('--output', default='../data',
                        help='Output directory for cached data (default: ../data)')
     parser.add_argument('--export', default='../clean_dataset_export',
