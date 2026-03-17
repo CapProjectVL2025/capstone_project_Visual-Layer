@@ -1,0 +1,140 @@
+{
+  "media_items": [
+    {
+      "media_id": "img_001",
+      "file_name": "n01440764/n01440764_1.JPEG",
+      "file_path": "/data/imagenet/n01440764/n01440764_1.JPEG",
+      "file_size": 102400,
+      "uniqueness_score": 0.92,
+      "height": 224,
+      "width": 224,
+      "cluster_id": "cluster_a",
+      "metadata_items": [
+        {"type": "image_label", "properties": {"category_name": "tench"}},
+        {"type": "issue", "properties": {"issue_type": "blurry", "confidence": 0.91}}
+      ]
+    },
+    {
+      "media_id": "img_002",
+      "file_name": "n01440764/n01440764_2.JPEG",
+      "file_path": "/data/imagenet/n01440764/n01440764_2.JPEG",
+      "file_size": 98304,
+      "uniqueness_score": 0.85,
+      "height": 224,
+      "width": 224,
+      "cluster_id": "cluster_a",
+      "metadata_items": [
+        {"type": "image_label", "properties": {"category_name": "tench"}}
+      ]
+    },
+    {
+      "media_id": "img_003",
+      "file_name": "n01440764/n01440764_3.JPEG",
+      "file_path": "/data/imagenet/n01440764/n01440764_3.JPEG",
+      "file_size": 76800,
+      "uniqueness_score": 0.10,
+      "height": 224,
+      "width": 224,
+      "cluster_id": "cluster_a",
+      "metadata_items": [
+        {"type": "image_label", "properties": {"category_name": "tench"}}
+      ]
+    },
+    {
+      "media_id": "img_004",
+      "file_name": "n01514668/n01514668_1.JPEG",
+      "file_path": "/data/imagenet/n01514668/n01514668_1.JPEG",
+      "file_size": 112640,
+      "uniqueness_score": 0.78,
+      "height": 224,
+      "width": 224,
+      "cluster_id": "cluster_b",
+      "metadata_items": [
+        {"type": "image_label", "properties": {"category_name": "cock"}},
+        {"type": "issue", "properties": {"issue_type": "mislabel", "confidence": 0.88}}
+      ]
+    },
+    {
+      "media_id": "img_005",
+      "file_name": "n01514668/n01514668_2.JPEG",
+      "file_path": "/data/imagenet/n01514668/n01514668_2.JPEG",
+      "file_size": 94208,
+      "uniqueness_score": 0.80,
+      "height": 224,
+      "width": 224,
+      "cluster_id": "cluster_b",
+      "metadata_items": [
+        {"type": "image_label", "properties": {"category_name": "cock"}}
+      ]
+    },
+    {
+      "media_id": "img_006",
+      "file_name": "n01514668/n01514668_3.JPEG",
+      "file_path": "/data/imagenet/n01514668/n01514668_3.JPEG",
+      "file_size": 88064,
+      "uniqueness_score": 0.12,
+      "height": 224,
+      "width": 224,
+      "cluster_id": "cluster_b",
+      "metadata_items": [
+        {"type": "image_label", "properties": {"category_name": "cock"}},
+        {"type": "issue", "properties": {"issue_type": "dark", "confidence": 0.92}}
+      ]
+    },
+    {
+      "media_id": "img_007",
+      "file_name": "n01491361/n01491361_1.JPEG",
+      "file_path": "/data/imagenet/n01491361/n01491361_1.JPEG",
+      "file_size": 131072,
+      "uniqueness_score": 0.95,
+      "height": 224,
+      "width": 224,
+      "cluster_id": "cluster_c",
+      "metadata_items": [
+        {"type": "image_label", "properties": {"category_name": "tiger shark"}},
+        {"type": "issue", "properties": {"issue_type": "visual_outlier", "confidence": 0.80}}
+      ]
+    },
+    {
+      "media_id": "img_008",
+      "file_name": "n01491361/n01491361_2.JPEG",
+      "file_path": "/data/imagenet/n01491361/n01491361_2.JPEG",
+      "file_size": 122880,
+      "uniqueness_score": 0.88,
+      "height": 224,
+      "width": 224,
+      "cluster_id": "cluster_c",
+      "metadata_items": [
+        {"type": "image_label", "properties": {"category_name": "tiger shark"}},
+        {"type": "user_tag", "tag_name": "poor_quality"}
+      ]
+    },
+    {
+      "media_id": "img_009",
+      "file_name": "n01491361/n01491361_3.JPEG",
+      "file_path": "/data/imagenet/n01491361/n01491361_3.JPEG",
+      "file_size": 115712,
+      "uniqueness_score": 0.73,
+      "height": 224,
+      "width": 224,
+      "cluster_id": "cluster_c",
+      "metadata_items": [
+        {"type": "image_label", "properties": {"category_name": "tiger shark"}}
+      ]
+    },
+    {
+      "media_id": "img_010",
+      "file_name": "n01491361/n01491361_4.JPEG",
+      "file_path": "/data/imagenet/n01491361/n01491361_4.JPEG",
+      "file_size": 109568,
+      "uniqueness_score": 0.90,
+      "height": 224,
+      "width": 224,
+      "cluster_id": "cluster_c",
+      "metadata_items": [
+        {"type": "image_label", "properties": {"category_name": "tiger shark"}},
+        {"type": "issue", "properties": {"issue_type": "label_outlier", "confidence": 0.85}}
+      ]
+    }
+  ]
+}

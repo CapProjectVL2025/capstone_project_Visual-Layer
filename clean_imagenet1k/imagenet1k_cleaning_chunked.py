@@ -1,29 +1,69 @@
 #!/usr/bin/env python3
 """
-Phase 1 clean-only pipeline for ImageNet-1K using filtered Visual Layer exports.
+ImageNet-1K Cleaning Pipeline
+==============================
 
-This script does not generate label noise. It merges filtered exports,
-applies cleaning policy, and writes clean + traceability artifacts.
+Applies a configurable cleaning policy to Visual Layer metadata exports
+and produces a reproducible set of artifacts for dataset-quality research.
+
+Public workflow (no live API required):
+    1. Start from local Visual Layer JSON exports already on disk.
+    2. Run ``from-filtered-json`` to merge, deduplicate, apply policy, and
+       write all guaranteed run artifacts.
+    3. Run ``analyze-cleaning-run`` to produce analysis CSVs and optional plots.
+    4. Run ``compare-cleaning-runs`` to compare policy variants side-by-side.
+    5. Run ``stress-test-policy-variants`` to sweep conservative / balanced /
+       aggressive variants over the same input.
+
+Supported public commands:
+    from-filtered-json          Core cleaning pipeline from local exports.
+    analyze-cleaning-run        Per-run analysis from prune_decisions.jsonl.
+    compare-cleaning-runs       Cross-run policy comparison CSV.
+    stress-test-policy-variants Policy sweep over a shared input directory.
+
+Guaranteed run outputs (from-filtered-json):
+    raw_merged_metadata.json    All records before cleaning.
+    cleaned_imagenet1k.json     Records kept by the policy.
+    metadata.json               Compatibility alias for cleaned output.
+    dropped_metadata.json       Records dropped by the policy.
+    prune_decisions.jsonl       Per-image keep/drop decision with reasons.
+    keep_filenames.txt          Filenames of kept images.
+    drop_filenames.txt          Filenames of dropped images.
+    cleaning_summary.json       Run metadata and counts.
+    cleaning_policy.yaml        Policy snapshot applied during this run.
+    README.md                   Short artifact description for the run directory.
+
+Guaranteed analysis outputs (analyze-cleaning-run):
+    analysis/policy_analysis_summary.json
+    analysis/drop_reason_counts.csv
+    analysis/drop_reason_overlap.csv
+    analysis/drop_reason_combinations.csv
+    analysis/class_impact.csv
+    analysis/uniqueness_by_decision.csv
+    analysis/issue_confidence_by_decision.csv
+    analysis/issue_types_by_label.csv
+    analysis/issue_types_by_label_plot_groups.csv
+
+Optional outputs:
+    analysis/plots/*.png        Generated only when matplotlib is available
+                                and --skip-plots is not set.
 """
 
 import argparse
+from copy import deepcopy
 import json
+import os
 import shutil
 import sys
-import zipfile
 from collections import Counter, defaultdict
 from datetime import datetime
+from itertools import combinations
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import yaml
-from dotenv import load_dotenv
 from tqdm import tqdm
-
-from connect_vl_api_f import VisualLayerAPIClient
-
-load_dotenv()
 
 INTERNAL_COLUMNS = {"__source_export_file", "__source_partition"}
 IMAGENET1K_EXPECTED_MEDIA_ITEMS = 1_331_167
@@ -33,20 +73,6 @@ def print_header(title: str):
     print("\n" + "=" * 70)
     print(title)
     print("=" * 70)
-
-
-def cleanup_python_cache(script_dir: Path):
-    removed = 0
-    for cache_dir in script_dir.rglob("__pycache__"):
-        if cache_dir.is_dir():
-            shutil.rmtree(cache_dir, ignore_errors=True)
-            removed += 1
-    for pyc_file in script_dir.rglob("*.pyc"):
-        if pyc_file.is_file():
-            pyc_file.unlink(missing_ok=True)
-            removed += 1
-    if removed > 0:
-        print(f"\nCleaned Python cache artifacts: {removed}")
 
 
 def normalize_issue_type(name: str) -> str:
@@ -65,108 +91,837 @@ def normalize_issue_type(name: str) -> str:
     return aliases.get(key, key)
 
 
+def _normalize_string_list(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if value is None:
+        return []
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _normalize_issue_list(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    issues: List[Dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        issue_type = normalize_issue_type(item.get("issue_type", ""))
+        conf_raw = item.get("confidence", 0.0)
+        try:
+            confidence = float(conf_raw)
+        except Exception:
+            confidence = 0.0
+        if issue_type:
+            issues.append({"issue_type": issue_type, "confidence": confidence})
+    return issues
+
+
+def _reason_bucket(reason: str) -> str:
+    if not reason:
+        return "other"
+    if reason.startswith("low_uniqueness<") or reason == "duplicate_in_cluster":
+        return "likely_redundant"
+    if reason.startswith("issue_"):
+        issue_name = normalize_issue_type(reason.replace("issue_", "", 1))
+        if issue_name in {"mislabel", "corrupted"}:
+            return "likely_harmful"
+        if issue_name in {"label_outlier", "visual_outlier"}:
+            return "review_atypical"
+        if issue_name in {"blurry", "dark", "overexposed"}:
+            return "quality_related"
+        return "issue_other"
+    if reason.startswith("user_tag:"):
+        lowered = reason.lower()
+        if any(tag in lowered for tag in ("wrong_class", "incorrect_label", "mislabeled")):
+            return "likely_harmful"
+        return "manual_review"
+    return "other"
+
+
+def _group_issue_type_for_plot(issue_type: str) -> str:
+    normalized = normalize_issue_type(issue_type)
+    plot_aliases = {
+        "dark": "visual_outlier",
+    }
+    return plot_aliases.get(normalized, normalized)
+
+
+def _series_stats(series: pd.Series) -> Dict[str, Any]:
+    numeric = pd.to_numeric(series, errors="coerce").dropna()
+    if numeric.empty:
+        return {
+            "count": 0,
+            "mean": None,
+            "median": None,
+            "min": None,
+            "p10": None,
+            "p25": None,
+            "p75": None,
+            "p90": None,
+            "max": None,
+        }
+    return {
+        "count": int(numeric.count()),
+        "mean": float(numeric.mean()),
+        "median": float(numeric.median()),
+        "min": float(numeric.min()),
+        "p10": float(numeric.quantile(0.10)),
+        "p25": float(numeric.quantile(0.25)),
+        "p75": float(numeric.quantile(0.75)),
+        "p90": float(numeric.quantile(0.90)),
+        "max": float(numeric.max()),
+    }
+
+
+def _load_cleaning_run(run_dir: Path) -> Tuple[pd.DataFrame, Dict[str, Any], Optional[Dict[str, Any]]]:
+    prune_path = run_dir / "prune_decisions.jsonl"
+    summary_path = run_dir / "cleaning_summary.json"
+    policy_path = run_dir / "cleaning_policy.yaml"
+
+    if not prune_path.exists():
+        raise FileNotFoundError(f"Missing prune decisions file: {prune_path}")
+    if not summary_path.exists():
+        raise FileNotFoundError(f"Missing cleaning summary file: {summary_path}")
+
+    prune_df = pd.read_json(prune_path, lines=True)
+    with open(summary_path, "r") as f:
+        summary = json.load(f)
+
+    policy = None
+    if policy_path.exists():
+        with open(policy_path, "r") as f:
+            policy = yaml.safe_load(f)
+
+    return prune_df, summary, policy
+
+
+def _prepare_prune_analysis_df(prune_df: pd.DataFrame) -> pd.DataFrame:
+    df = prune_df.copy()
+
+    if "keep" not in df.columns:
+        raise ValueError("prune_decisions.jsonl is missing required column 'keep'")
+
+    df["keep"] = df["keep"].fillna(False).astype(bool)
+    if "label" not in df.columns:
+        df["label"] = "unknown"
+    df["label"] = df["label"].fillna("unknown").astype(str)
+    df.loc[df["label"].str.strip() == "", "label"] = "unknown"
+
+    if "uniqueness_score" not in df.columns:
+        df["uniqueness_score"] = 0.0
+    df["uniqueness_score"] = pd.to_numeric(df["uniqueness_score"], errors="coerce")
+
+    if "drop_reasons" not in df.columns:
+        df["drop_reasons"] = [[] for _ in range(len(df))]
+    df["drop_reasons"] = df["drop_reasons"].apply(_normalize_string_list)
+    df["reason_count"] = df["drop_reasons"].apply(len)
+    df["reason_combo"] = df["drop_reasons"].apply(lambda x: " | ".join(sorted(set(x))) if x else "")
+
+    if "issues" not in df.columns:
+        df["issues"] = [[] for _ in range(len(df))]
+    df["issues"] = df["issues"].apply(_normalize_issue_list)
+    df["issue_types"] = df["issues"].apply(lambda x: sorted({normalize_issue_type(i.get("issue_type", "")) for i in x if i.get("issue_type")}))
+    df["issue_count"] = df["issue_types"].apply(len)
+    df["has_issues"] = df["issue_count"] > 0
+    df["max_issue_confidence"] = df["issues"].apply(
+        lambda x: max((float(i.get("confidence", 0.0)) for i in x), default=None)
+    )
+
+    df["decision"] = df["keep"].map({True: "kept", False: "dropped"})
+    return df
+
+
+def _build_drop_reason_counts(df: pd.DataFrame) -> pd.DataFrame:
+    dropped = df[~df["keep"]].copy()
+    total_images = len(df)
+    total_dropped = len(dropped)
+    if dropped.empty:
+        return pd.DataFrame(
+            columns=["reason", "reason_bucket", "count", "share_of_total", "share_of_dropped"]
+        )
+
+    exploded = dropped[["drop_reasons"]].explode("drop_reasons")
+    exploded = exploded.dropna(subset=["drop_reasons"])
+    exploded = exploded.rename(columns={"drop_reasons": "reason"})
+
+    counts = exploded["reason"].value_counts().rename_axis("reason").reset_index(name="count")
+    counts["reason_bucket"] = counts["reason"].apply(_reason_bucket)
+    counts["share_of_total"] = counts["count"] / total_images if total_images else 0.0
+    counts["share_of_dropped"] = counts["count"] / total_dropped if total_dropped else 0.0
+    return counts.sort_values(["count", "reason"], ascending=[False, True]).reset_index(drop=True)
+
+
+def _build_drop_reason_overlaps(df: pd.DataFrame) -> pd.DataFrame:
+    dropped = df[~df["keep"]].copy()
+    pair_counts: Counter[Tuple[str, str]] = Counter()
+    single_counts: Counter[str] = Counter()
+
+    for reasons in dropped["drop_reasons"]:
+        unique_reasons = sorted(set(reasons))
+        for reason in unique_reasons:
+            single_counts[reason] += 1
+        for reason_a, reason_b in combinations(unique_reasons, 2):
+            pair_counts[(reason_a, reason_b)] += 1
+
+    rows: List[Dict[str, Any]] = []
+    for (reason_a, reason_b), shared_count in sorted(pair_counts.items(), key=lambda item: (-item[1], item[0])):
+        denom = single_counts[reason_a] + single_counts[reason_b] - shared_count
+        rows.append(
+            {
+                "reason_a": reason_a,
+                "reason_b": reason_b,
+                "shared_count": int(shared_count),
+                "jaccard": float(shared_count / denom) if denom else 0.0,
+            }
+        )
+    return pd.DataFrame(rows, columns=["reason_a", "reason_b", "shared_count", "jaccard"])
+
+
+def _build_drop_reason_combinations(df: pd.DataFrame) -> pd.DataFrame:
+    dropped = df[~df["keep"]].copy()
+    if dropped.empty:
+        return pd.DataFrame(columns=["reason_combo", "count", "reason_count"])
+
+    counts = dropped["reason_combo"].value_counts().rename_axis("reason_combo").reset_index(name="count")
+    counts["reason_count"] = counts["reason_combo"].apply(lambda x: 0 if not x else len(str(x).split(" | ")))
+    return counts.sort_values(["count", "reason_combo"], ascending=[False, True]).reset_index(drop=True)
+
+
+def _build_class_impact(df: pd.DataFrame) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    grouped = df.groupby("label", dropna=False)
+
+    for label, group in grouped:
+        total = int(len(group))
+        kept = int(group["keep"].sum())
+        dropped = total - kept
+        dropped_rows = group[~group["keep"]]
+        drop_reason_counter: Counter[str] = Counter()
+        for reasons in dropped_rows["drop_reasons"]:
+            drop_reason_counter.update(set(reasons))
+        top_drop_reason = drop_reason_counter.most_common(1)[0][0] if drop_reason_counter else ""
+
+        rows.append(
+            {
+                "label": label,
+                "total_images": total,
+                "kept_images": kept,
+                "dropped_images": dropped,
+                "drop_fraction": float(dropped / total) if total else 0.0,
+                "issue_hit_rate": float(group["has_issues"].mean()) if total else 0.0,
+                "multi_reason_drop_rate": float((dropped_rows["reason_count"] > 1).mean()) if dropped else 0.0,
+                "mean_uniqueness_all": float(group["uniqueness_score"].dropna().mean()) if group["uniqueness_score"].notna().any() else None,
+                "mean_uniqueness_kept": float(group.loc[group["keep"], "uniqueness_score"].dropna().mean()) if kept and group.loc[group["keep"], "uniqueness_score"].notna().any() else None,
+                "mean_uniqueness_dropped": float(dropped_rows["uniqueness_score"].dropna().mean()) if dropped and dropped_rows["uniqueness_score"].notna().any() else None,
+                "top_drop_reason": top_drop_reason,
+            }
+        )
+
+    class_impact = pd.DataFrame(rows)
+    return class_impact.sort_values(["drop_fraction", "dropped_images", "label"], ascending=[False, False, True]).reset_index(drop=True)
+
+
+def _annotate_over_pruning(
+    class_impact: pd.DataFrame,
+    min_class_size: int,
+    min_dropped_images: int,
+) -> pd.DataFrame:
+    annotated = class_impact.copy()
+    if annotated.empty:
+        annotated["drop_fraction_robust_z"] = pd.Series(dtype=float)
+        annotated["over_pruned_severity"] = pd.Series(dtype=str)
+        annotated["over_pruned_flag"] = pd.Series(dtype=bool)
+        return annotated
+
+    eligible_mask = (
+        (annotated["total_images"] >= int(min_class_size))
+        & (annotated["dropped_images"] >= int(min_dropped_images))
+    )
+    eligible = annotated[eligible_mask]
+
+    annotated["drop_fraction_robust_z"] = 0.0
+    annotated["over_pruned_severity"] = "normal"
+    annotated["over_pruned_flag"] = False
+
+    if eligible.empty:
+        return annotated
+
+    median = float(eligible["drop_fraction"].median())
+    mad = float((eligible["drop_fraction"] - median).abs().median())
+    if mad > 0:
+        annotated["drop_fraction_robust_z"] = 0.6745 * (annotated["drop_fraction"] - median) / mad
+
+    p90 = float(eligible["drop_fraction"].quantile(0.90))
+    p95 = float(eligible["drop_fraction"].quantile(0.95))
+
+    elevated_mask = eligible_mask & (
+        (annotated["drop_fraction"] >= p90)
+        | (annotated["drop_fraction_robust_z"] >= 2.0)
+    )
+    high_mask = eligible_mask & (
+        (annotated["drop_fraction"] >= p95)
+        | (annotated["drop_fraction_robust_z"] >= 3.0)
+    )
+
+    annotated.loc[elevated_mask, "over_pruned_severity"] = "elevated"
+    annotated.loc[high_mask, "over_pruned_severity"] = "high"
+    annotated["over_pruned_flag"] = annotated["over_pruned_severity"].isin(["elevated", "high"])
+
+    return annotated.sort_values(
+        ["over_pruned_flag", "drop_fraction", "dropped_images", "label"],
+        ascending=[False, False, False, True],
+    ).reset_index(drop=True)
+
+
+def _build_distribution_summary(df: pd.DataFrame, value_col: str, output_col_name: str) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    for decision, group in df.groupby("decision"):
+        stats = _series_stats(group[value_col])
+        stats[output_col_name] = decision
+        rows.append(stats)
+    ordered_cols = [output_col_name, "count", "mean", "median", "min", "p10", "p25", "p75", "p90", "max"]
+    return pd.DataFrame(rows)[ordered_cols]
+
+
+def _build_issue_type_by_label_matrix(
+    df: pd.DataFrame,
+    class_impact: pd.DataFrame,
+) -> pd.DataFrame:
+    label_order = class_impact["label"].tolist() if not class_impact.empty else sorted(df["label"].dropna().astype(str).unique())
+    issue_rows: List[Dict[str, Any]] = []
+    dropped = df[~df["keep"]].copy()
+
+    for _, row in dropped.iterrows():
+        for issue_type in row.get("issue_types", []):
+            issue_rows.append({"label": row["label"], "issue_type": issue_type})
+
+    if issue_rows:
+        matrix = pd.DataFrame(issue_rows).groupby(["label", "issue_type"]).size().unstack(fill_value=0)
+    else:
+        matrix = pd.DataFrame(index=label_order)
+
+    if label_order:
+        matrix = matrix.reindex(label_order, fill_value=0)
+    matrix.index.name = "label"
+    return matrix
+
+
+def _group_issue_matrix_for_plot(issue_matrix: pd.DataFrame) -> pd.DataFrame:
+    if issue_matrix.empty:
+        return issue_matrix.copy()
+    grouped_columns = [_group_issue_type_for_plot(col) for col in issue_matrix.columns]
+    grouped = issue_matrix.copy()
+    grouped.columns = grouped_columns
+    grouped = grouped.T.groupby(level=0).sum().T
+    grouped.index.name = issue_matrix.index.name
+    return grouped
+
+
+def _build_policy_analysis_summary(
+    df: pd.DataFrame,
+    summary: Dict[str, Any],
+    policy: Optional[Dict[str, Any]],
+    reason_counts: pd.DataFrame,
+    overlap_df: pd.DataFrame,
+    combo_df: pd.DataFrame,
+    class_impact: pd.DataFrame,
+    run_dir: Path,
+    output_dir: Path,
+    top_classes_limit: int,
+) -> Dict[str, Any]:
+    total_images = int(len(df))
+    kept_images = int(df["keep"].sum())
+    dropped_images = total_images - kept_images
+    drop_bucket_counts = (
+        reason_counts.groupby("reason_bucket")["count"].sum().sort_values(ascending=False).to_dict()
+        if not reason_counts.empty
+        else {}
+    )
+    combo_counts = {
+        "single_reason": int((df["reason_count"] == 1).sum()),
+        "two_reasons": int((df["reason_count"] == 2).sum()),
+        "three_or_more_reasons": int((df["reason_count"] >= 3).sum()),
+    }
+
+    top_classes = class_impact.head(top_classes_limit)[
+        ["label", "drop_fraction", "dropped_images", "top_drop_reason", "over_pruned_flag", "over_pruned_severity"]
+    ].to_dict(orient="records")
+    top_reason_pairs = overlap_df.head(20).to_dict(orient="records") if not overlap_df.empty else []
+    top_reason_combinations = combo_df.head(20).to_dict(orient="records") if not combo_df.empty else []
+    flagged_classes = class_impact[class_impact["over_pruned_flag"]].head(top_classes_limit)[
+        ["label", "drop_fraction", "dropped_images", "top_drop_reason", "over_pruned_severity"]
+    ].to_dict(orient="records")
+
+    summary_payload: Dict[str, Any] = {
+        "timestamp": datetime.now().isoformat(),
+        "run_dir": str(run_dir),
+        "analysis_output_dir": str(output_dir),
+        "policy_name": summary.get("policy_name") or (policy or {}).get("policy_name", "unknown"),
+        "total_images": total_images,
+        "kept": kept_images,
+        "dropped": dropped_images,
+        "drop_rate": float(dropped_images / total_images) if total_images else 0.0,
+        "consistency_checks": {
+            "summary_total_matches_prune_rows": int(summary.get("total_images", -1)) == total_images,
+            "summary_kept_matches_prune_rows": int(summary.get("kept", -1)) == kept_images,
+            "summary_dropped_matches_prune_rows": int(summary.get("dropped", -1)) == dropped_images,
+        },
+        "drop_bucket_counts": drop_bucket_counts,
+        "multi_reason_breakdown": combo_counts,
+        "top_drop_reasons": reason_counts.head(20).to_dict(orient="records"),
+        "top_reason_pairs": top_reason_pairs,
+        "top_reason_combinations": top_reason_combinations,
+        "top_over_pruned_classes": top_classes,
+        "flagged_over_pruned_classes": flagged_classes,
+        "artifacts": {
+            "drop_reason_counts_csv": str(output_dir / "drop_reason_counts.csv"),
+            "drop_reason_overlap_csv": str(output_dir / "drop_reason_overlap.csv"),
+            "drop_reason_combinations_csv": str(output_dir / "drop_reason_combinations.csv"),
+            "class_impact_csv": str(output_dir / "class_impact.csv"),
+            "uniqueness_by_decision_csv": str(output_dir / "uniqueness_by_decision.csv"),
+            "issue_confidence_by_decision_csv": str(output_dir / "issue_confidence_by_decision.csv"),
+            "issue_types_by_label_csv": str(output_dir / "issue_types_by_label.csv"),
+        },
+    }
+
+    if policy:
+        summary_payload["policy_snapshot"] = {
+            "policy_version": policy.get("policy_version"),
+            "policy_name": policy.get("policy_name"),
+            "uniqueness_threshold": policy.get("uniqueness_threshold"),
+            "dedupe_by_cluster": policy.get("dedupe_by_cluster"),
+            "drop_issues": policy.get("drop_issues", []),
+            "drop_tags": policy.get("drop_tags", []),
+        }
+
+    return summary_payload
+
+
+def _import_matplotlib():
+    try:
+        mpl_cache = Path(os.environ.get("MPLCONFIGDIR", "/tmp/matplotlib"))
+        mpl_cache.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("MPLCONFIGDIR", str(mpl_cache))
+        os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
+
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        return plt
+    except Exception as exc:
+        print(f"WARNING: Plot generation skipped: {exc}")
+        return None
+
+
+def _generate_analysis_plots(
+    total_images: int,
+    kept_images: int,
+    dropped_images: int,
+    policy_name: str,
+    class_impact: pd.DataFrame,
+    issue_plot_matrix: pd.DataFrame,
+    output_dir: Path,
+    top_classes_limit: int,
+) -> List[str]:
+    plt = _import_matplotlib()
+    if plt is None:
+        return []
+
+    plots_dir = output_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    generated: List[str] = []
+
+    if total_images > 0:
+        fig, ax = plt.subplots(figsize=(8, 8))
+        counts = [kept_images, dropped_images]
+        labels = [f"Kept\n{kept_images:,} ({kept_images / total_images:.1%})", f"Dropped\n{dropped_images:,} ({dropped_images / total_images:.1%})"]
+        colors = ["#3b8a64", "#c44e4e"]
+        ax.pie(counts, labels=labels, colors=colors, startangle=90, counterclock=False)
+        ax.set_title(f"ImageNet Images Kept vs Dropped\n{policy_name.replace('_', ' ').title()}")
+        fig.tight_layout()
+        path = plots_dir / "kept_vs_dropped_pie_chart.png"
+        fig.savefig(path, dpi=180)
+        plt.close(fig)
+        generated.append(str(path))
+
+    if not class_impact.empty:
+        top_classes = class_impact.head(top_classes_limit).iloc[::-1]
+        fig, ax = plt.subplots(figsize=(10, max(6, top_classes_limit * 0.3)))
+        ax.barh(top_classes["label"], top_classes["drop_fraction"], color="#8a5a44")
+        ax.set_title(f"Top {len(top_classes)} Classes by Drop Fraction")
+        ax.set_xlabel("Drop Fraction")
+        ax.set_ylabel("Class Label")
+        fig.tight_layout()
+        path = plots_dir / "top_classes_by_drop_fraction.png"
+        fig.savefig(path, dpi=180)
+        plt.close(fig)
+        generated.append(str(path))
+
+        top_class_names = list(class_impact.head(min(top_classes_limit, 10))["label"])
+        available_labels = [label for label in top_class_names if label in issue_plot_matrix.index]
+        if available_labels:
+            stacked = issue_plot_matrix.reindex(available_labels, fill_value=0)
+            if stacked.to_numpy().sum() > 0:
+                fig, ax = plt.subplots(figsize=(12, 7))
+                stacked.plot(kind="bar", stacked=True, ax=ax, colormap="tab20")
+                ax.set_title("Issue Types Across Top Dropped Classes")
+                ax.set_xlabel("Class Label")
+                ax.set_ylabel("Dropped Images with Issue")
+                ax.legend(title="Issue Type", bbox_to_anchor=(1.02, 1), loc="upper left")
+                fig.tight_layout()
+                path = plots_dir / "issue_types_top_dropped_classes.png"
+                fig.savefig(path, dpi=180)
+                plt.close(fig)
+                generated.append(str(path))
+
+    return generated
+
+
+def _generate_issue_type_by_label_pages(
+    issue_matrix: pd.DataFrame,
+    output_dir: Path,
+    page_size: int = 40,
+) -> List[str]:
+    plt = _import_matplotlib()
+    if plt is None or issue_matrix.empty:
+        return []
+
+    plots_dir = output_dir / "plots" / "issue_types_by_label_pages"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    generated: List[str] = []
+
+    nonzero_matrix = issue_matrix.loc[issue_matrix.sum(axis=1) > 0]
+    if nonzero_matrix.empty:
+        return []
+
+    for page_idx, start in enumerate(range(0, len(nonzero_matrix), page_size), start=1):
+        subset = nonzero_matrix.iloc[start:start + page_size]
+        fig_height = max(8, len(subset) * 0.28)
+        fig, ax = plt.subplots(figsize=(14, fig_height))
+        subset.iloc[::-1].plot(kind="barh", stacked=True, ax=ax, colormap="tab20")
+        ax.set_title(f"Issue Types Across Dropped Labels (Page {page_idx})")
+        ax.set_xlabel("Dropped Images with Issue")
+        ax.set_ylabel("Class Label")
+        ax.legend(title="Issue Type", bbox_to_anchor=(1.02, 1), loc="upper left")
+        fig.tight_layout()
+        path = plots_dir / f"issue_types_by_label_page_{page_idx:03d}.png"
+        fig.savefig(path, dpi=180)
+        plt.close(fig)
+        generated.append(str(path))
+
+    return generated
+
+
+def _write_cleaning_run_analysis(
+    run_dir: Path,
+    output_dir: Path,
+    top_classes: int,
+    skip_plots: bool,
+    min_class_size: int,
+    min_dropped_images: int,
+) -> Dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    prune_df, summary, policy = _load_cleaning_run(run_dir)
+    df = _prepare_prune_analysis_df(prune_df)
+
+    reason_counts = _build_drop_reason_counts(df)
+    overlap_df = _build_drop_reason_overlaps(df)
+    combo_df = _build_drop_reason_combinations(df)
+    class_impact = _annotate_over_pruning(
+        _build_class_impact(df),
+        min_class_size=min_class_size,
+        min_dropped_images=min_dropped_images,
+    )
+    issue_matrix = _build_issue_type_by_label_matrix(df, class_impact)
+    issue_plot_matrix = _group_issue_matrix_for_plot(issue_matrix)
+    uniqueness_stats = _build_distribution_summary(df, "uniqueness_score", "decision")
+    issue_conf_stats = _build_distribution_summary(df, "max_issue_confidence", "decision")
+
+    reason_counts.to_csv(output_dir / "drop_reason_counts.csv", index=False)
+    overlap_df.to_csv(output_dir / "drop_reason_overlap.csv", index=False)
+    combo_df.to_csv(output_dir / "drop_reason_combinations.csv", index=False)
+    class_impact.to_csv(output_dir / "class_impact.csv", index=False)
+    uniqueness_stats.to_csv(output_dir / "uniqueness_by_decision.csv", index=False)
+    issue_conf_stats.to_csv(output_dir / "issue_confidence_by_decision.csv", index=False)
+    issue_matrix.to_csv(output_dir / "issue_types_by_label.csv")
+    issue_plot_matrix.to_csv(output_dir / "issue_types_by_label_plot_groups.csv")
+
+    analysis_summary = _build_policy_analysis_summary(
+        df=df,
+        summary=summary,
+        policy=policy,
+        reason_counts=reason_counts,
+        overlap_df=overlap_df,
+        combo_df=combo_df,
+        class_impact=class_impact,
+        run_dir=run_dir,
+        output_dir=output_dir,
+        top_classes_limit=top_classes,
+    )
+
+    if skip_plots:
+        plot_paths: List[str] = []
+    else:
+        plot_paths = _generate_analysis_plots(
+            total_images=analysis_summary["total_images"],
+            kept_images=analysis_summary["kept"],
+            dropped_images=analysis_summary["dropped"],
+            policy_name=analysis_summary["policy_name"],
+            class_impact=class_impact,
+            issue_plot_matrix=issue_plot_matrix,
+            output_dir=output_dir,
+            top_classes_limit=top_classes,
+        )
+        plot_paths.extend(
+            _generate_issue_type_by_label_pages(
+                issue_matrix=issue_plot_matrix,
+                output_dir=output_dir,
+            )
+        )
+    analysis_summary["artifacts"]["plots"] = plot_paths
+    analysis_summary["over_pruning_thresholds"] = {
+        "min_class_size": int(min_class_size),
+        "min_dropped_images": int(min_dropped_images),
+    }
+
+    with open(output_dir / "policy_analysis_summary.json", "w") as f:
+        json.dump(analysis_summary, f, indent=2)
+
+    return analysis_summary
+
+
+def analyze_cleaning_run(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run_dir)
+    output_dir = Path(args.output_dir) if args.output_dir else run_dir / "analysis"
+
+    analysis_summary = _write_cleaning_run_analysis(
+        run_dir=run_dir,
+        output_dir=output_dir,
+        top_classes=args.top_classes,
+        skip_plots=args.skip_plots,
+        min_class_size=args.min_class_size,
+        min_dropped_images=args.min_dropped_images,
+    )
+
+    print_header("Cleaning Analysis Complete")
+    print(f"Run dir: {run_dir}")
+    print(f"Analysis dir: {output_dir}")
+    print(f"Total images: {analysis_summary['total_images']:,}")
+    print(f"Dropped images: {analysis_summary['dropped']:,} ({analysis_summary['drop_rate']:.2%})")
+    return 0
+
+
+def _variant_uniqueness_threshold(base_policy: Dict[str, Any], variant_name: str) -> Optional[float]:
+    base_raw = base_policy.get("uniqueness_threshold")
+    base_threshold = float(base_raw) if base_raw is not None else None
+    if variant_name == "aggressive":
+        return base_threshold
+    target = 0.20 if variant_name == "conservative" else 0.25
+    if base_threshold is None:
+        return target
+    return min(base_threshold, target)
+
+
+def _variant_issue_floor(issue_type: str, variant_name: str) -> Optional[float]:
+    if variant_name == "aggressive":
+        return None
+    if variant_name == "conservative":
+        if issue_type == "corrupted":
+            return 0.5
+        return 0.9
+    balanced_defaults = {
+        "mislabel": 0.8,
+        "label_outlier": 0.85,
+        "visual_outlier": 0.8,
+        "blurry": 0.85,
+        "dark": 0.9,
+        "overexposed": 0.9,
+        "corrupted": 0.5,
+    }
+    return balanced_defaults.get(issue_type, 0.8)
+
+
+def build_policy_variant(base_policy: Dict[str, Any], variant_name: str) -> Dict[str, Any]:
+    normalized_variant = str(variant_name).strip().lower()
+    if normalized_variant not in {"conservative", "balanced", "aggressive"}:
+        raise ValueError(f"Unsupported policy variant: {variant_name}")
+
+    variant = deepcopy(base_policy)
+    base_name = str(base_policy.get("policy_name", "policy")).strip() or "policy"
+    if normalized_variant == "aggressive":
+        if "aggressive" not in base_name.lower():
+            variant["policy_name"] = f"{base_name}_aggressive"
+    else:
+        variant["policy_name"] = f"{base_name}_{normalized_variant}"
+
+    variant["analysis_variant"] = normalized_variant
+    variant["uniqueness_threshold"] = _variant_uniqueness_threshold(base_policy, normalized_variant)
+
+    updated_rules: List[Dict[str, Any]] = []
+    for issue_rule in variant.get("drop_issues", []):
+        if not isinstance(issue_rule, dict):
+            continue
+        updated = deepcopy(issue_rule)
+        issue_type = normalize_issue_type(updated.get("issue_type", ""))
+        floor = _variant_issue_floor(issue_type, normalized_variant)
+        if floor is not None:
+            try:
+                current = float(updated.get("min_confidence", 0.0))
+            except Exception:
+                current = 0.0
+            updated["min_confidence"] = max(current, floor)
+        updated_rules.append(updated)
+    variant["drop_issues"] = updated_rules
+    return variant
+
+
+def _sanitize_name(value: str) -> str:
+    text = "".join(ch.lower() if ch.isalnum() else "_" for ch in str(value))
+    while "__" in text:
+        text = text.replace("__", "_")
+    return text.strip("_") or "run"
+
+
+def stress_test_policy_variants(args: argparse.Namespace) -> int:
+    source_partition = args.source_partition or "policy_sweep"
+    input_dir = Path(args.input_dir)
+    output_root = Path(args.output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    base_policy = load_policy(args.policy)
+    raw_df = ingest_filtered_exports(
+        input_dir=input_dir,
+        glob_pattern=args.glob,
+        source_partition=source_partition,
+        skip_invalid=args.skip_invalid,
+    )
+    norm_df = normalize_records(raw_df)
+    merged_df = merge_and_dedupe(norm_df)
+    coverage = validate_merged_coverage(
+        merged_df=merged_df,
+        expected_total_media_items=args.expected_total_media_items,
+        require_full_coverage=args.require_full_coverage,
+    )
+
+    generated_policy_dir = output_root / "_generated_policies"
+    generated_policy_dir.mkdir(parents=True, exist_ok=True)
+    comparison_rows: List[Dict[str, Any]] = []
+    run_dirs: List[Path] = []
+
+    for variant_name in args.variants:
+        variant_policy = build_policy_variant(base_policy, variant_name)
+        variant_slug = _sanitize_name(variant_policy.get("policy_name", variant_name))
+        variant_policy_path = generated_policy_dir / f"{variant_slug}.yaml"
+        with open(variant_policy_path, "w") as f:
+            yaml.safe_dump(variant_policy, f, sort_keys=False)
+
+        keep_df, drop_df, drop_reasons = apply_cleaning_policy(merged_df, variant_policy)
+        run_dir = output_root / f"clean_{source_partition}_{variant_slug}_groups"
+        save_outputs(
+            merged_df=merged_df,
+            keep_df=keep_df,
+            drop_df=drop_df,
+            drop_reasons=drop_reasons,
+            policy=variant_policy,
+            out_dir=run_dir,
+            run_mode="metadata-only",
+            policy_path=str(variant_policy_path),
+            images_root=None,
+        )
+        analysis_summary = _write_cleaning_run_analysis(
+            run_dir=run_dir,
+            output_dir=run_dir / "analysis",
+            top_classes=args.top_classes,
+            skip_plots=args.skip_plots,
+            min_class_size=args.min_class_size,
+            min_dropped_images=args.min_dropped_images,
+        )
+        comparison_rows.append(
+            {
+                "policy_name": analysis_summary["policy_name"],
+                "variant": variant_name,
+                "run_dir": str(run_dir),
+                "total_images": analysis_summary["total_images"],
+                "kept": analysis_summary["kept"],
+                "dropped": analysis_summary["dropped"],
+                "drop_rate": analysis_summary["drop_rate"],
+                "flagged_over_pruned_classes": len(analysis_summary.get("flagged_over_pruned_classes", [])),
+                "top_drop_reason": analysis_summary.get("top_drop_reasons", [{}])[0].get("reason", "")
+                if analysis_summary.get("top_drop_reasons")
+                else "",
+            }
+        )
+        run_dirs.append(run_dir)
+
+    comparison_df = pd.DataFrame(comparison_rows).sort_values(["drop_rate", "policy_name"], ascending=[False, True])
+    comparison_path = output_root / "policy_comparison.csv"
+    comparison_df.to_csv(comparison_path, index=False)
+
+    combined_summary = {
+        "timestamp": datetime.now().isoformat(),
+        "input_dir": str(input_dir),
+        "source_partition": source_partition,
+        "base_policy": args.policy,
+        "coverage_check": coverage,
+        "variants": list(args.variants),
+        "run_dirs": [str(p) for p in run_dirs],
+        "comparison_csv": str(comparison_path),
+    }
+    combined_summary_path = output_root / "policy_stress_test_summary.json"
+    with open(combined_summary_path, "w") as f:
+        json.dump(combined_summary, f, indent=2)
+
+    print_header("Policy Stress Test Complete")
+    print(f"Input dir: {input_dir}")
+    print(f"Output root: {output_root}")
+    print(f"Saved comparison: {comparison_path}")
+    return 0
+
+
+def compare_cleaning_runs(args: argparse.Namespace) -> int:
+    run_dirs = [Path(p) for p in args.run_dirs]
+    output_path = Path(args.output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    rows: List[Dict[str, Any]] = []
+    for run_dir in run_dirs:
+        prune_df, summary, policy = _load_cleaning_run(run_dir)
+        df = _prepare_prune_analysis_df(prune_df)
+        dropped = df[~df["keep"]]
+        reason_counter: Counter[str] = Counter()
+        for reasons in dropped["drop_reasons"]:
+            reason_counter.update(set(reasons))
+        top_reason = reason_counter.most_common(1)[0][0] if reason_counter else ""
+        rows.append(
+            {
+                "run_dir": str(run_dir),
+                "policy_name": summary.get("policy_name") or (policy or {}).get("policy_name", "unknown"),
+                "total_images": int(len(df)),
+                "kept": int(df["keep"].sum()),
+                "dropped": int((~df["keep"]).sum()),
+                "drop_rate": float((~df["keep"]).mean()) if len(df) else 0.0,
+                "unique_drop_reasons": int(len(reason_counter)),
+                "top_drop_reason": top_reason,
+            }
+        )
+
+    comparison_df = pd.DataFrame(rows).sort_values(["drop_rate", "policy_name"], ascending=[False, True])
+    comparison_df.to_csv(output_path, index=False)
+
+    print_header("Cleaning Policy Comparison Complete")
+    print(f"Saved comparison: {output_path}")
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Clean ImageNet-1K from filtered export JSON files")
     subparsers = parser.add_subparsers(dest="command", required=True)
-
-    dry = subparsers.add_parser("dry-run-auth", help="Validate Visual Layer auth + dataset access")
-    dry.add_argument("--dataset-id", required=True, help="Visual Layer dataset ID")
-
-    export_cmd = subparsers.add_parser("export-from-vl", help="Step 1: export filtered partitions from Visual Layer")
-    export_cmd.add_argument("--dataset-id", required=True, help="Visual Layer dataset ID")
-    export_cmd.add_argument(
-        "--partitions-config",
-        default=None,
-        help="Path to JSON config describing partition filters",
-    )
-    export_cmd.add_argument(
-        "--cluster-ids-file",
-        default=None,
-        help="Optional text file of cluster IDs (one per line) to auto-build partition filters",
-    )
-    export_cmd.add_argument(
-        "--entity-type",
-        default="IMAGES",
-        help="Entity type for export request (default: IMAGES)",
-    )
-    export_cmd.add_argument(
-        "--threshold",
-        default="1",
-        help="Threshold parameter for export request (default: 1)",
-    )
-    export_cmd.add_argument("--export-dir", required=True, help="Output directory for downloaded partition exports")
-    export_cmd.add_argument("--include-images", action="store_true", help="Include images in export zip files")
-    export_cmd.add_argument("--file-prefix", default="partition", help="Filename prefix for export archives")
-    export_cmd.add_argument(
-        "--sub-partition-size",
-        type=int,
-        default=10000,
-        help="Fallback chunk size when export is rejected for too many entities (default: 10000)",
-    )
-    export_cmd.add_argument(
-        "--offset-param",
-        default="offset",
-        help="Query param name used for pagination offset in fallback mode (default: offset)",
-    )
-    export_cmd.add_argument(
-        "--limit-param",
-        default="limit",
-        help="Query param name used for pagination limit in fallback mode (default: limit)",
-    )
-    export_cmd.add_argument(
-        "--max-sub-partitions",
-        type=int,
-        default=10000,
-        help="Safety limit for fallback sub-partitions per partition (default: 10000)",
-    )
-
-    discover_cmd = subparsers.add_parser(
-        "discover-cluster-ids",
-        help="Discover cluster IDs from Visual Layer via API and write cluster_ids.txt",
-    )
-    discover_cmd.add_argument("--dataset-id", required=True, help="Visual Layer dataset ID")
-    discover_cmd.add_argument(
-        "--output-file",
-        default="clean_imagenet1k/cluster_ids.txt",
-        help="Output text file (one cluster UUID per line)",
-    )
-    discover_cmd.add_argument(
-        "--temp-dir",
-        default="data/_cluster_discovery_tmp",
-        help="Temp directory for discovery export artifacts",
-    )
-    discover_cmd.add_argument(
-        "--entity-type",
-        default="CLUSTERS",
-        help="Entity type used for discovery export (default: CLUSTERS)",
-    )
-    discover_cmd.add_argument(
-        "--threshold",
-        default="1",
-        help="Threshold parameter for discovery export (default: 1)",
-    )
-    discover_cmd.add_argument(
-        "--page-size",
-        type=int,
-        default=10000,
-        help="Page size for fallback IMAGES discovery paging (default: 10000)",
-    )
-    discover_cmd.add_argument(
-        "--offset-param",
-        default="offset",
-        help="Query param name used for discovery paging offset (default: offset)",
-    )
-    discover_cmd.add_argument(
-        "--limit-param",
-        default="limit",
-        help="Query param name used for discovery paging limit (default: limit)",
-    )
-    discover_cmd.add_argument(
-        "--max-pages",
-        type=int,
-        default=10000,
-        help="Safety cap for discovery paging requests (default: 10000)",
-    )
 
     filt = subparsers.add_parser("from-filtered-json", help="Run clean-only pipeline from filtered JSON exports")
     filt.add_argument("--partition-mode", choices=["cluster", "class", "both"], required=True)
@@ -193,6 +948,114 @@ def parse_args() -> argparse.Namespace:
         help="Fail run unless merged unique count matches --expected-total-media-items",
     )
 
+    analyze_cmd = subparsers.add_parser(
+        "analyze-cleaning-run",
+        help="Analyze a completed cleaning run from prune_decisions.jsonl + cleaning_summary.json",
+    )
+    analyze_cmd.add_argument("--run-dir", required=True, help="Path to clean_*_groups run directory")
+    analyze_cmd.add_argument(
+        "--output-dir",
+        default=None,
+        help="Directory for analysis outputs (default: <run-dir>/analysis)",
+    )
+    analyze_cmd.add_argument(
+        "--top-classes",
+        type=int,
+        default=20,
+        help="Number of top classes by drop fraction to include in reports and plots (default: 20)",
+    )
+    analyze_cmd.add_argument(
+        "--skip-plots",
+        action="store_true",
+        help="Skip optional PNG plot generation",
+    )
+    analyze_cmd.add_argument(
+        "--min-class-size",
+        type=int,
+        default=50,
+        help="Minimum class size before over-pruning flags are evaluated (default: 50)",
+    )
+    analyze_cmd.add_argument(
+        "--min-dropped-images",
+        type=int,
+        default=10,
+        help="Minimum dropped images before over-pruning flags are evaluated (default: 10)",
+    )
+
+    compare_cmd = subparsers.add_parser(
+        "compare-cleaning-runs",
+        help="Compare multiple completed cleaning runs and write policy_comparison.csv",
+    )
+    compare_cmd.add_argument(
+        "--run-dirs",
+        nargs="+",
+        required=True,
+        help="One or more clean_*_groups run directories to compare",
+    )
+    compare_cmd.add_argument(
+        "--output-file",
+        default="data/policy_comparison.csv",
+        help="CSV output path for run comparison (default: data/policy_comparison.csv)",
+    )
+
+    stress_cmd = subparsers.add_parser(
+        "stress-test-policy-variants",
+        help="Apply conservative/balanced/aggressive policy variants to the same filtered JSON input",
+    )
+    stress_cmd.add_argument("--input-dir", required=True, help="Folder of filtered JSON exports to evaluate")
+    stress_cmd.add_argument("--policy", required=True, help="Base cleaning policy YAML used to derive variants")
+    stress_cmd.add_argument("--output-root", required=True, help="Root folder for policy-sweep outputs")
+    stress_cmd.add_argument("--glob", default="**/*.json", help="Glob pattern for filtered export files")
+    stress_cmd.add_argument("--skip-invalid", action="store_true", help="Skip invalid JSON files instead of failing")
+    stress_cmd.add_argument(
+        "--expected-total-media-items",
+        type=int,
+        default=IMAGENET1K_EXPECTED_MEDIA_ITEMS,
+        help=(
+            "Expected full dataset size used for coverage reporting "
+            f"(default: {IMAGENET1K_EXPECTED_MEDIA_ITEMS:,})."
+        ),
+    )
+    stress_cmd.add_argument(
+        "--require-full-coverage",
+        action="store_true",
+        help="Fail run unless merged unique count matches --expected-total-media-items",
+    )
+    stress_cmd.add_argument(
+        "--variants",
+        nargs="+",
+        default=["conservative", "balanced", "aggressive"],
+        help="Policy variants to derive from the base policy (default: conservative balanced aggressive)",
+    )
+    stress_cmd.add_argument(
+        "--source-partition",
+        default="policy_sweep",
+        help="Name used in generated run directory labels (default: policy_sweep)",
+    )
+    stress_cmd.add_argument(
+        "--top-classes",
+        type=int,
+        default=20,
+        help="Number of top classes by drop fraction to include in reports and plots (default: 20)",
+    )
+    stress_cmd.add_argument(
+        "--min-class-size",
+        type=int,
+        default=50,
+        help="Minimum class size before over-pruning flags are evaluated (default: 50)",
+    )
+    stress_cmd.add_argument(
+        "--min-dropped-images",
+        type=int,
+        default=10,
+        help="Minimum dropped images before over-pruning flags are evaluated (default: 10)",
+    )
+    stress_cmd.add_argument(
+        "--skip-plots",
+        action="store_true",
+        help="Skip optional PNG plot generation for each variant",
+    )
+
     args = parser.parse_args()
 
     if args.command == "from-filtered-json":
@@ -202,11 +1065,6 @@ def parse_args() -> argparse.Namespace:
             parser.error("--class-input-dir is required for partition-mode class/both")
         if args.mode == "with-images" and not args.images_root:
             parser.error("--images-root is required when --mode with-images")
-    elif args.command == "export-from-vl":
-        if not args.partitions_config and not args.cluster_ids_file:
-            parser.error("Provide either --partitions-config or --cluster-ids-file")
-        if args.partitions_config and args.cluster_ids_file:
-            parser.error("Use only one of --partitions-config or --cluster-ids-file")
 
     return args
 
@@ -218,394 +1076,6 @@ def load_policy(policy_path: str) -> Dict[str, Any]:
     with open(p, "r") as f:
         policy = yaml.safe_load(f)
     return policy
-
-
-def load_partitions_config(config_path: str) -> List[Dict[str, Any]]:
-    """
-    Load partition config for Visual Layer filtered exports.
-
-    Expected JSON format:
-    {
-      "partitions": [
-        {"name": "class_group_01", "extra_params": {"...": "..."}},
-        {"name": "class_group_02", "extra_params": {"...": "..."}}
-      ]
-    }
-    """
-    p = Path(config_path)
-    if not p.exists():
-        raise FileNotFoundError(f"Partitions config not found: {config_path}")
-
-    with open(p, "r") as f:
-        payload = json.load(f)
-
-    parts = payload.get("partitions", [])
-    if not isinstance(parts, list) or not parts:
-        raise ValueError("Partitions config must contain non-empty 'partitions' list")
-
-    normalized: List[Dict[str, Any]] = []
-    for i, part in enumerate(parts):
-        if not isinstance(part, dict):
-            raise ValueError(f"Partition index {i} must be an object")
-        name = str(part.get("name", f"partition_{i+1:03d}")).strip()
-        extra_params = part.get("extra_params", {})
-        if not isinstance(extra_params, dict):
-            raise ValueError(f"Partition '{name}' must include object 'extra_params'")
-        normalized.append({"name": name, "extra_params": extra_params})
-    return normalized
-
-
-def load_cluster_ids(cluster_ids_file: str) -> List[str]:
-    p = Path(cluster_ids_file)
-    if not p.exists():
-        raise FileNotFoundError(f"Cluster IDs file not found: {cluster_ids_file}")
-    lines = [ln.strip() for ln in p.read_text().splitlines()]
-    ids = [ln for ln in lines if ln and not ln.startswith("#")]
-    if not ids:
-        raise ValueError(f"No cluster IDs found in {cluster_ids_file}")
-    return ids
-
-
-def build_partitions_from_cluster_ids(
-    cluster_ids: List[str],
-    entity_type: str,
-    threshold: str,
-) -> List[Dict[str, Any]]:
-    partitions: List[Dict[str, Any]] = []
-    for idx, cluster_id in enumerate(cluster_ids, start=1):
-        partitions.append(
-            {
-                "name": f"cluster_{idx:05d}",
-                "extra_params": {
-                    "entity_type": entity_type,
-                    "threshold": str(threshold),
-                    "cluster_id": cluster_id,
-                },
-            }
-        )
-    return partitions
-
-
-def _collect_cluster_ids_from_obj(obj: Any, ids: Set[str]) -> None:
-    if isinstance(obj, dict):
-        cluster_id = obj.get("cluster_id")
-        if isinstance(cluster_id, str) and cluster_id.strip():
-            ids.add(cluster_id.strip())
-        for v in obj.values():
-            _collect_cluster_ids_from_obj(v, ids)
-        return
-    if isinstance(obj, list):
-        for item in obj:
-            _collect_cluster_ids_from_obj(item, ids)
-
-
-def _is_entities_exceeded_error(err: Exception) -> bool:
-    text = str(err).lower()
-    return "exceeds threshold" in text or ("entities" in text and "rejected" in text)
-
-
-def _extract_export(zip_path: Path, extract_dir: Path) -> int:
-    extract_dir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(extract_dir)
-
-    json_files = sorted(p for p in extract_dir.glob("**/*.json") if p.is_file())
-    media_items_count = 0
-    for path in json_files:
-        try:
-            with open(path, "r") as f:
-                payload = json.load(f)
-            if isinstance(payload, dict):
-                media_items = payload.get("media_items")
-                if isinstance(media_items, list):
-                    media_items_count += len(media_items)
-        except Exception:
-            continue
-    return media_items_count
-
-
-def discover_cluster_ids_from_vl(
-    dataset_id: str,
-    output_file: str,
-    temp_dir: str,
-    entity_type: str = "CLUSTERS",
-    threshold: str = "1",
-    page_size: int = 10000,
-    offset_param: str = "offset",
-    limit_param: str = "limit",
-    max_pages: int = 10000,
-) -> int:
-    print_header("Discover Cluster IDs From Visual Layer")
-    out_path = Path(output_file)
-    tmp_root = Path(temp_dir)
-    tmp_root.mkdir(parents=True, exist_ok=True)
-
-    client = VisualLayerAPIClient()
-    if not client.test_connection(dataset_id):
-        return 1
-
-    def run_discovery_export(
-        extra_params: Dict[str, Any],
-        export_suffix: str,
-    ) -> int:
-        file_name = f"cluster_discovery_{export_suffix}.zip"
-        task_id = client.export_dataset(
-            dataset_id=dataset_id,
-            format="json",
-            include_images=False,
-            file_name=file_name,
-            extra_params=extra_params,
-        )
-        download_url = client.wait_for_export(dataset_id, task_id)
-
-        run_dir = tmp_root / export_suffix
-        run_dir.mkdir(parents=True, exist_ok=True)
-        zip_path = run_dir / file_name
-        client.download_export(download_url, str(zip_path))
-
-        extract_dir = run_dir / "extracted"
-        media_count = _extract_export(zip_path=zip_path, extract_dir=extract_dir)
-
-        json_files = sorted(p for p in extract_dir.glob("**/*.json") if p.is_file())
-        if not json_files:
-            return 0
-        for json_path in json_files:
-            with open(json_path, "r") as f:
-                payload = json.load(f)
-            _collect_cluster_ids_from_obj(payload, cluster_ids)
-        return media_count
-
-    cluster_ids: Set[str] = set()
-    base_params = {"entity_type": entity_type, "threshold": str(threshold)}
-    try:
-        run_discovery_export(
-            extra_params=base_params,
-            export_suffix=datetime.now().strftime("%Y%m%d_%H%M%S"),
-        )
-    except Exception as e:
-        # Some environments reject CLUSTERS with 500; fallback to paged IMAGES.
-        if str(entity_type).upper() != "CLUSTERS":
-            raise
-        print(
-            "Discovery with entity_type=CLUSTERS failed; "
-            "falling back to paged entity_type=IMAGES discovery..."
-        )
-        offset = 0
-        pages = 0
-        while pages < max_pages:
-            pages += 1
-            current_limit = int(page_size)
-            while True:
-                suffix = f"images_page_{pages:05d}"
-                params = {
-                    "entity_type": "IMAGES",
-                    "threshold": str(threshold),
-                    offset_param: offset,
-                    limit_param: current_limit,
-                }
-                print(
-                    f"  Discovery page {pages}: {offset_param}={offset}, "
-                    f"{limit_param}={current_limit}"
-                )
-                try:
-                    media_count = run_discovery_export(extra_params=params, export_suffix=suffix)
-                    break
-                except Exception as page_err:
-                    if _is_entities_exceeded_error(page_err) and current_limit > 1:
-                        current_limit = max(1, current_limit // 2)
-                        print(
-                            f"  Page too large; retrying with {limit_param}={current_limit}"
-                        )
-                        continue
-                    raise
-
-            if media_count <= 0:
-                print("  Reached empty page; discovery complete.")
-                break
-
-            offset += media_count
-            if media_count < current_limit:
-                print("  Final partial page reached; discovery complete.")
-                break
-        else:
-            raise RuntimeError(
-                f"Discovery exceeded max pages ({max_pages}). Increase --max-pages."
-            )
-
-    if not cluster_ids:
-        raise RuntimeError(
-            "No cluster_id values found in discovery export. "
-            "Try --entity-type IMAGES and confirm the export contains cluster_id fields."
-        )
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("\n".join(sorted(cluster_ids)) + "\n")
-    print(f"Discovered cluster IDs: {len(cluster_ids):,}")
-    print(f"Saved cluster IDs file: {out_path}")
-    return 0
-
-
-def export_partitions_from_vl(
-    dataset_id: str,
-    partitions_config: Optional[str],
-    export_dir: str,
-    include_images: bool = False,
-    file_prefix: str = "partition",
-    cluster_ids_file: Optional[str] = None,
-    entity_type: str = "IMAGES",
-    threshold: str = "1",
-    sub_partition_size: int = 10000,
-    offset_param: str = "offset",
-    limit_param: str = "limit",
-    max_sub_partitions: int = 10000,
-) -> int:
-    print_header("Step 1: Export Filtered Partitions From Visual Layer")
-    if cluster_ids_file:
-        cluster_ids = load_cluster_ids(cluster_ids_file)
-        partitions = build_partitions_from_cluster_ids(
-            cluster_ids=cluster_ids,
-            entity_type=entity_type,
-            threshold=threshold,
-        )
-    elif partitions_config:
-        partitions = load_partitions_config(partitions_config)
-    else:
-        raise ValueError("Either partitions_config or cluster_ids_file must be provided")
-    out_root = Path(export_dir)
-    out_root.mkdir(parents=True, exist_ok=True)
-
-    client = VisualLayerAPIClient()
-    if not client.test_connection(dataset_id):
-        return 1
-
-    results: List[Dict[str, Any]] = []
-
-    def run_single_export(
-        part_name: str,
-        params: Dict[str, Any],
-        seq_idx: int,
-        suffix: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        suffix_part = f"_{suffix}" if suffix else ""
-        file_name = f"{file_prefix}_{seq_idx:03d}_{part_name}{suffix_part}.zip"
-        task_id = client.export_dataset(
-            dataset_id=dataset_id,
-            format="json",
-            include_images=include_images,
-            file_name=file_name,
-            extra_params=params,
-        )
-        download_url = client.wait_for_export(dataset_id, task_id)
-
-        export_folder = part_name if not suffix else f"{part_name}/{suffix}"
-        part_dir = out_root / export_folder
-        part_dir.mkdir(parents=True, exist_ok=True)
-
-        zip_path = part_dir / file_name
-        client.download_export(download_url, str(zip_path))
-
-        extract_dir = part_dir / "extracted"
-        media_items_count = _extract_export(zip_path=zip_path, extract_dir=extract_dir)
-        json_files = list(extract_dir.glob("**/*.json"))
-
-        return {
-            "name": part_name,
-            "suffix": suffix,
-            "zip_path": str(zip_path),
-            "extract_dir": str(extract_dir),
-            "json_files_found": len(json_files),
-            "media_items_count": media_items_count,
-            "extra_params": params,
-        }
-
-    for idx, part in enumerate(partitions, start=1):
-        name = part["name"]
-        params = part["extra_params"]
-
-        print(f"\nExporting partition {idx}/{len(partitions)}: {name}")
-        try:
-            res = run_single_export(part_name=name, params=params, seq_idx=idx)
-            results.append(res)
-            print(f"  Extracted JSON files: {res['json_files_found']}")
-            continue
-        except Exception as e:
-            if not _is_entities_exceeded_error(e):
-                raise
-            print(
-                "  Export exceeded entity threshold; switching to automatic "
-                f"sub-partitioning with {sub_partition_size:,} items/chunk..."
-            )
-
-        # Fallback: offset/limit paging for oversized partitions.
-        offset = 0
-        sub_idx = 0
-        while sub_idx < max_sub_partitions:
-            sub_idx += 1
-            current_limit = int(sub_partition_size)
-            while True:
-                chunk_suffix = f"chunk_{sub_idx:05d}"
-                chunk_params = {**params, offset_param: offset, limit_param: current_limit}
-                print(
-                    f"    Chunk {sub_idx}: {offset_param}={offset}, "
-                    f"{limit_param}={current_limit}"
-                )
-                try:
-                    chunk_res = run_single_export(
-                        part_name=name,
-                        params=chunk_params,
-                        seq_idx=idx,
-                        suffix=chunk_suffix,
-                    )
-                    break
-                except Exception as chunk_err:
-                    if _is_entities_exceeded_error(chunk_err) and current_limit > 1:
-                        current_limit = max(1, current_limit // 2)
-                        print(f"    Chunk still too large; retrying with {limit_param}={current_limit}")
-                        continue
-                    raise
-
-            chunk_count = int(chunk_res.get("media_items_count", 0))
-            chunk_res["chunk_index"] = sub_idx
-            chunk_res["chunk_offset"] = offset
-            chunk_res["chunk_limit"] = current_limit
-            results.append(chunk_res)
-            print(f"    Chunk exported rows: {chunk_count:,}")
-
-            if chunk_count <= 0:
-                print("    Reached empty chunk; partition export complete.")
-                break
-
-            offset += chunk_count
-            if chunk_count < current_limit:
-                print("    Final partial chunk reached; partition export complete.")
-                break
-        else:
-            raise RuntimeError(
-                f"Exceeded max sub-partitions ({max_sub_partitions}) for partition '{name}'. "
-                "Increase --max-sub-partitions or review partition filters."
-            )
-
-    summary = {
-        "timestamp": datetime.now().isoformat(),
-        "dataset_id": dataset_id,
-        "include_images": include_images,
-        "partitions_config": partitions_config,
-        "cluster_ids_file": cluster_ids_file,
-        "entity_type": entity_type,
-        "threshold": str(threshold),
-        "sub_partition_size": int(sub_partition_size),
-        "offset_param": offset_param,
-        "limit_param": limit_param,
-        "max_sub_partitions": int(max_sub_partitions),
-        "export_dir": str(out_root),
-        "results": results,
-    }
-    summary_path = out_root / "export_partitions_summary.json"
-    with open(summary_path, "w") as f:
-        json.dump(summary, f, indent=2)
-    print(f"\nSaved export summary: {summary_path}")
-    print("Export partitions complete.")
-    return 0
 
 
 def ingest_filtered_exports(
@@ -1041,17 +1511,6 @@ def run_partition(
     return result
 
 
-def run_dry_run_auth(dataset_id: str) -> int:
-    print_header("Dry Run Auth")
-    client = VisualLayerAPIClient()
-    ok = client.test_connection(dataset_id)
-    if ok:
-        print("Dry-run auth passed")
-        return 0
-    print("Dry-run auth failed")
-    return 1
-
-
 def run_from_filtered_json(args: argparse.Namespace) -> int:
     policy = load_policy(args.policy)
     output_root = Path(args.output_root)
@@ -1116,40 +1575,16 @@ def run_from_filtered_json(args: argparse.Namespace) -> int:
 
 def main() -> int:
     args = parse_args()
-    script_dir = Path(__file__).resolve().parent
 
     try:
-        if args.command == "dry-run-auth":
-            return run_dry_run_auth(args.dataset_id)
-        if args.command == "export-from-vl":
-            return export_partitions_from_vl(
-                dataset_id=args.dataset_id,
-                partitions_config=args.partitions_config,
-                export_dir=args.export_dir,
-                include_images=args.include_images,
-                file_prefix=args.file_prefix,
-                cluster_ids_file=args.cluster_ids_file,
-                entity_type=args.entity_type,
-                threshold=args.threshold,
-                sub_partition_size=args.sub_partition_size,
-                offset_param=args.offset_param,
-                limit_param=args.limit_param,
-                max_sub_partitions=args.max_sub_partitions,
-            )
-        if args.command == "discover-cluster-ids":
-            return discover_cluster_ids_from_vl(
-                dataset_id=args.dataset_id,
-                output_file=args.output_file,
-                temp_dir=args.temp_dir,
-                entity_type=args.entity_type,
-                threshold=args.threshold,
-                page_size=args.page_size,
-                offset_param=args.offset_param,
-                limit_param=args.limit_param,
-                max_pages=args.max_pages,
-            )
         if args.command == "from-filtered-json":
             return run_from_filtered_json(args)
+        if args.command == "analyze-cleaning-run":
+            return analyze_cleaning_run(args)
+        if args.command == "compare-cleaning-runs":
+            return compare_cleaning_runs(args)
+        if args.command == "stress-test-policy-variants":
+            return stress_test_policy_variants(args)
         raise ValueError(f"Unsupported command: {args.command}")
     except KeyboardInterrupt:
         print("Interrupted by user")
@@ -1160,8 +1595,6 @@ def main() -> int:
 
         traceback.print_exc()
         return 1
-    finally:
-        cleanup_python_cache(script_dir)
 
 
 if __name__ == "__main__":

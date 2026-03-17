@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+title: "ImageNet-1K Dataset Cleaning with Visual Layer"
+message: "If you use this repository or the cleaning pipeline in your research, please cite it using the metadata below."
+type: software
+authors:
+  - family-names: Song
+    given-names: Alec
+  - family-names: Gupta
+    given-names: Rushil
+  - family-names: Kanaujia
+    given-names: Kushagra
+  - family-names: Arellano
+    given-names: Saeed
+  - family-names: Ranjan
+    given-names: Bhavya
+repository-code: "https://github.com/CapProjectVL2025/capstone_project_Visual-Layer"
+url: "https://github.com/CapProjectVL2025/capstone_project_Visual-Layer"
+abstract: "A reproducible pipeline for cleaning ImageNet-1K from Visual Layer metadata exports, with traceable pruning artifacts and policy analysis outputs."
+keywords:
+  - ImageNet
+  - dataset cleaning
+  - data quality
+  - machine learning
+  - computer vision
+  - reproducibility
+license: MIT
+version: 1.0.0
+date-released: 2026-03-16

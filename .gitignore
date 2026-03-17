@@ -19,12 +19,15 @@ CLEANING_READY.flag
 vl_data/
 data/cluster_exports_*/
 data/experiments/
+data/test_runs/
 *.log
 
 # Python cache
 __pycache__/
 **/__pycache__/
 *.pyc
+.venv/
+.pytest_cache/
 files/
 .DS_Store
 alec/__pycache__/

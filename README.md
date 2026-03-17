@@ -1,215 +1,194 @@
-# CMPSC189 - Visual Layer
+# ImageNet-1K Dataset Cleaning with Visual Layer
 
-**Team Members:**  
-- Alec Song  
-- Rushil Gupta
-- Kushagra Kanaujia
-- Saeed Arellano
-- Bhavya Ranjan
+This repository provides a reproducible dataset-cleaning pipeline for ImageNet-1K.
+It applies a configurable quality policy to Visual Layer metadata exports and
+produces a fully traceable set of artifacts suitable for noise-robustness research.
 
-## Overview
+**Team:** Alec Song, Rushil Gupta, Kushagra Kanaujia, Saeed Arellano, Bhavya Ranjan
 
-This project explores how *structured label noise* affects model performance on large-scale vision datasets.  
+---
 
-## Project Summary
-This repo focuses on an embedding-driven noise pipeline:
+## What this repo reproduces
 
-1. Build a clean label table aligned with embeddings.
-2. Inject controlled noise into labels using one of several modes.
-3. Visualize and inspect where the noisy labels land in t-SNE space.
-4. Feed noisy labels into downstream training/evaluation pipelines.
+Given local Visual Layer metadata exports for ImageNet-1K, this pipeline:
 
-## Data Model (Important)
-In this workflow, each row is typically an **object-level embedding** (not necessarily one row per image).
+1. Merges and deduplicates all partition exports into a single record set.
+2. Applies a versioned cleaning policy (confidence thresholds, uniqueness filtering, tag rules).
+3. Writes a complete set of guaranteed artifacts — cleaned records, drop decisions, filenames, summary.
+4. Generates per-run analysis: drop reason counts, class impact, uniqueness distributions, issue matrices.
+5. Supports side-by-side comparison of multiple policy variants.
 
-- `embeddings.npy`: shape `[N, D]`
-- clean labels CSV: `N` rows with at least:
-  - `vector_id` (or your chosen id column)
-  - `label`
-- row `i` in labels must correspond to row `i` in embeddings.
+Visual Layer is the **metadata source** — it provides per-image quality scores,
+issue detections, and cluster assignments. The public workflow starts from
+JSON exports already on disk; a live Visual Layer API connection is **not
+required** to reproduce results.
 
-`noise_injection.py` validates this row alignment for embedding-based modes.
+---
 
-## Noise Injection Script
-Script: `alec/scripts/noise_injection.py`
+## What is included vs excluded
 
-### Supported modes
-- `random`: randomly picks points and flips each to a random different class.
-- `border`: prioritizes boundary-like points (small margin between nearest same-class and nearest different-class neighbors), then fills from global pool if needed.
-- `cluster`: picks seed points and flips local neighbor clusters to a **single target label per seed**.
+| Included | Excluded |
+|---|---|
+| `clean_imagenet1k/imagenet1k_cleaning_chunked.py` — main pipeline script | Live VL API calls (optional, internal) |
+| `clean_imagenet1k/cleaning_policy.yaml` — versioned policy | Raw image files (not redistributed) |
+| `tests/` — smoke tests and fixture | Noise-injection scripts (research tooling only) |
+| `requirements.txt` — locked dependencies | |
 
-### Outputs
-- `--output-labels`: noisy label CSV (same columns as input labels, label column replaced)
-- `--log-file`: per-change log CSV with `index`, `original_label`, `new_label`, `reason`
+---
 
-For `border` mode:
-- `reason=border` means changed from boundary pool
-- `reason=border_fill_nn` means changed during fill phase
-- runtime prints counts for both
+## Installation
 
-## Environment
-Install dependencies (example):
+Python 3.8 or later is required.
 
 ```bash
+git clone https://github.com/CapProjectVL2025/capstone_project_Visual-Layer.git
+cd capstone_project_Visual-Layer
 python3 -m venv .venv
 source .venv/bin/activate
-pip install numpy pandas scikit-learn matplotlib torch datasets tqdm
+pip install -r requirements.txt
 ```
 
-## Quick Start
-Run from `alec/` so relative paths stay simple:
+---
+
+## Reproducing the paper workflow
+
+### Step 1 — Run the cleaning pipeline
+
+Place your Visual Layer JSON exports in a directory (e.g. `data/vl_exports/`).
+Each file must contain a top-level `"media_items"` list.
+See [clean_imagenet1k/README.md](clean_imagenet1k/README.md) for the exact input format.
 
 ```bash
-cd /Users/alecsong/School/capstone/capstone_project_Visual-Layer/alec
-mkdir -p labels logs plots
+python3 clean_imagenet1k/imagenet1k_cleaning_chunked.py from-filtered-json \
+  --partition-mode cluster \
+  --cluster-input-dir data/vl_exports \
+  --policy clean_imagenet1k/cleaning_policy.yaml \
+  --output-root data \
+  --mode metadata-only
 ```
 
-### 1) Optional: build `embeddings.npy` + clean labels from metadata
+Outputs are written to `data/clean_cluster_groups/` for cluster-mode runs and
+`data/clean_class_groups/` for class-mode runs.
+
+### Step 2 — Analyze the cleaning run
 
 ```bash
-python3 scripts/export_embeddings_npy.py \
-  --metadata-csv /Users/alecsong/School/capstone/metadata/embeddings.csv \
-  --embeddings-dir /Users/alecsong/School/capstone/embeddings \
-  --out-npy embeddings.npy \
-  --out-labels labels/labels_clean.csv \
-  --max-rows 0
+python3 clean_imagenet1k/imagenet1k_cleaning_chunked.py analyze-cleaning-run \
+  --run-dir data/clean_cluster_groups
 ```
 
-`--max-rows 0` means no cap (use all available rows).
+Add `--skip-plots` to omit PNG generation.
 
-### 2) (Optional) create a faster 10k subset for debugging
+### Step 3 — Compare policy variants (optional)
 
 ```bash
-python3 - <<'PY'
-import numpy as np, pandas as pd
-X = np.load('embeddings.npy')
-df = pd.read_csv('labels/labels_clean.csv')
-rng = np.random.RandomState(42)
-idx = np.sort(rng.choice(len(df), size=10000, replace=False))
-np.save('embeddings_10k.npy', X[idx])
-df.iloc[idx].reset_index(drop=True).to_csv('labels/labels_clean_10k.csv', index=False)
-print('wrote embeddings_10k.npy and labels/labels_clean_10k.csv')
-PY
+python3 clean_imagenet1k/imagenet1k_cleaning_chunked.py compare-cleaning-runs \
+  --run-dirs data/run_conservative data/run_balanced data/run_aggressive \
+  --output-file data/policy_comparison.csv
 ```
 
-## Generate Noisy Labels
-
-### Example: random / border / cluster at 10%
+### Step 4 — Stress-test policy variants (optional)
 
 ```bash
-python3 scripts/noise_injection.py \
-  --labels labels/labels_clean.csv \
-  --output-labels labels/coco_labels_random_10.csv \
-  --log-file logs/coco_log_random_10.csv \
-  --mode random \
-  --noise-level 0.10 \
-  --random-seed 42
-
-python3 scripts/noise_injection.py \
-  --embeddings embeddings.npy \
-  --labels labels/labels_clean.csv \
-  --output-labels labels/coco_labels_border_10.csv \
-  --log-file logs/coco_log_border_10.csv \
-  --mode border \
-  --noise-level 0.10 \
-  --boundary-k 25 \
-  --boundary-top-frac 0.25 \
-  --nn-k 50 \
-  --metric cosine \
-  --random-seed 42
-
-python3 scripts/noise_injection.py \
-  --embeddings embeddings.npy \
-  --labels labels/labels_clean.csv \
-  --output-labels labels/coco_labels_cluster_10.csv \
-  --log-file logs/coco_log_cluster_10.csv \
-  --mode cluster \
-  --noise-level 0.10 \
-  --cluster-size 50 \
-  --nn-k 50 \
-  --metric cosine \
-  --random-seed 42
+python3 clean_imagenet1k/imagenet1k_cleaning_chunked.py stress-test-policy-variants \
+  --input-dir data/vl_exports \
+  --policy clean_imagenet1k/cleaning_policy.yaml \
+  --output-root data/policy_sweep
 ```
 
-### Example: generate 5%, 15%, 30% for `cluster` and `border`
+---
+
+## Output artifact contract
+
+### Run outputs (`from-filtered-json`)
+
+| File | Description |
+|---|---|
+| `raw_merged_metadata.json` | All records before any cleaning |
+| `cleaned_imagenet1k.json` | Records kept by the policy |
+| `metadata.json` | Compatibility alias for `cleaned_imagenet1k.json` |
+| `dropped_metadata.json` | Records dropped by the policy |
+| `prune_decisions.jsonl` | Per-image keep/drop decision with reasons |
+| `keep_filenames.txt` | Filenames of kept images |
+| `drop_filenames.txt` | Filenames of dropped images |
+| `cleaning_summary.json` | Run metadata: timestamp, counts, artifact paths |
+| `cleaning_policy.yaml` | Snapshot of the policy applied during this run |
+| `README.md` | Short artifact guide for the run directory |
+
+### Analysis outputs (`analyze-cleaning-run`)
+
+| File | Description |
+|---|---|
+| `analysis/policy_analysis_summary.json` | Top drop reasons, flagged classes, policy snapshot |
+| `analysis/drop_reason_counts.csv` | Image count per drop reason with bucket classification |
+| `analysis/drop_reason_overlap.csv` | Pairwise Jaccard similarity between drop reasons |
+| `analysis/drop_reason_combinations.csv` | Multi-reason drop patterns |
+| `analysis/class_impact.csv` | Per-class drop fraction, issue hit rate, uniqueness stats |
+| `analysis/uniqueness_by_decision.csv` | Uniqueness score distribution (kept vs dropped) |
+| `analysis/issue_confidence_by_decision.csv` | Issue confidence distribution (kept vs dropped) |
+| `analysis/issue_types_by_label.csv` | Issue type count matrix by class label |
+| `analysis/issue_types_by_label_plot_groups.csv` | Grouped version for visualization |
+
+### Optional outputs
+
+| File | Description |
+|---|---|
+| `analysis/plots/*.png` | Generated when matplotlib is available and `--skip-plots` is not set |
+
+### Sweep outputs (`stress-test-policy-variants`)
+
+| File | Description |
+|---|---|
+| `policy_comparison.csv` | Side-by-side metrics across all variants |
+| `policy_stress_test_summary.json` | Per-variant run summary |
+
+---
+
+## Smoke tests
+
+Verify the installation and all public commands against a small fixture:
 
 ```bash
-for p in 05 15 30; do
-  lv="0.${p}"
-
-  python3 scripts/noise_injection.py \
-    --embeddings embeddings.npy \
-    --labels labels/labels_clean.csv \
-    --output-labels "labels/coco_labels_cluster_${p}.csv" \
-    --log-file "logs/coco_log_cluster_${p}.csv" \
-    --mode cluster \
-    --noise-level "$lv" \
-    --cluster-size 50 \
-    --nn-k 50 \
-    --metric cosine \
-    --random-seed 42
-
-  python3 scripts/noise_injection.py \
-    --embeddings embeddings.npy \
-    --labels labels/labels_clean.csv \
-    --output-labels "labels/coco_labels_border_${p}.csv" \
-    --log-file "logs/coco_log_border_${p}.csv" \
-    --mode border \
-    --noise-level "$lv" \
-    --boundary-k 25 \
-    --boundary-top-frac 0.25 \
-    --nn-k 50 \
-    --metric cosine \
-    --random-seed 42
-
-done
+python3 -m unittest tests.test_policy_behavior -v
+python3 -m pytest tests/ -v
 ```
 
-## Visualizing Noise
-
-### A) Cluster coherence diagnostic
+Or run individually:
 
 ```bash
-python3 scripts/viz_issue_cluster_incoherence.py \
-  --embeddings embeddings_10k.npy \
-  --labels labels/labels_clean_10k.csv \
-  --log logs/coco_log_cluster_10.csv \
-  --out plots/issue_cluster_incoherence.png
+# CLI help
+python3 clean_imagenet1k/imagenet1k_cleaning_chunked.py --help
+
+# Fixture-based run
+python3 clean_imagenet1k/imagenet1k_cleaning_chunked.py from-filtered-json \
+  --partition-mode cluster \
+  --cluster-input-dir tests/fixtures/sample_export \
+  --policy clean_imagenet1k/cleaning_policy.yaml \
+  --output-root /tmp/test_run \
+  --mode metadata-only \
+  --expected-total-media-items 10
 ```
 
-What this shows:
-- gray = background points
-- colored = changed points
-- color = `new_label`
-- coherent clusters should tend to be one color per local cluster
+---
 
-### B) Pairwise clean vs noisy t-SNE view
-Use `viz_tsne_mislabels.py` with clean labels plus one or more noisy CSVs:
+## Limitations
 
-```bash
-python3 scripts/viz_tsne_mislabels.py \
-  --embeddings embeddings_10k.npy \
-  --labels-clean labels/labels_clean_10k.csv \
-  --classes 2 39 \
-  --noisy-random labels/coco_labels_random_10.csv \
-  --noisy-border labels/coco_labels_border_10.csv \
-  --noisy-cluster labels/coco_labels_cluster_10.csv \
-  --out-dir plots
+- Raw ImageNet-1K images are not included; only metadata exports and analysis artifacts are provided.
+- Visual Layer is used upstream to generate the local JSON exports consumed by this repo; the published workflow begins from those local exports.
+- Plot generation requires `matplotlib`; all other commands run without it.
+- The `--mode with-images` flag requires the original image files to be present locally.
+
+---
+
+## Citation
+
+If you use this pipeline or the cleaned dataset in your research, please cite:
+
 ```
-
-It writes one image per provided noise type, each with:
-- left: clean labels
-- right: corrupted labels
-- `X` markers on changed points
-
-## Practical Notes
-- `random` mode does not require embeddings.
-- `border` and `cluster` require embeddings and are much heavier at full dataset scale.
-- For fast iteration, use the 10k subset.
-- For full-size runs, prefer a high-memory VM.
-
-## Troubleshooting
-- Row mismatch error: your labels CSV and embeddings matrix are not aligned.
-- Missing label/id columns: pass `--label-column` and `--id-column` explicitly.
-- Slow runtime: reduce dataset size first (`embeddings_10k.npy`) and tune `nn-k`, `boundary-k`, `cluster-size`.
-
+@misc{visuallayer-imagenet-cleaning-2025,
+  title  = {Reproducible ImageNet-1K Dataset Cleaning with Visual Layer},
+  author = {Song, Alec and Gupta, Rushil and Kanaujia, Kushagra and Arellano, Saeed and Ranjan, Bhavya},
+  year   = {2026},
+  url    = {https://github.com/CapProjectVL2025/capstone_project_Visual-Layer}
+}
+```
