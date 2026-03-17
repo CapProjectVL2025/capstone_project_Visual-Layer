@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 import argparse
-import os
 from pathlib import Path
 import sys
+
 import numpy as np
 import pandas as pd
 from sklearn.neighbors import NearestNeighbors
-
-
 
 
 def resolve_repo_path(raw_path: str, repo_root: Path) -> str:
@@ -59,7 +57,6 @@ def build_knn(X: np.ndarray, metric: str, k: int):
 
 
 def nearest_diff_neighbor(neigh_row: np.ndarray, labels: np.ndarray, i: int):
-    """Return the nearest neighbor index with a different label, or None."""
     yi = labels[i]
     for j in neigh_row:
         if j == i:
@@ -69,14 +66,25 @@ def nearest_diff_neighbor(neigh_row: np.ndarray, labels: np.ndarray, i: int):
     return None
 
 
+def nearest_diff_neighbor_in_allowed_set(
+    neigh_row: np.ndarray,
+    labels: np.ndarray,
+    i: int,
+    allowed_label_strs: set[str],
+):
+    yi = labels[i]
+    yi_str = str(yi)
+    for j in neigh_row:
+        if j == i:
+            continue
+        yj = labels[j]
+        yj_str = str(yj)
+        if yj_str in allowed_label_strs and yj_str != yi_str:
+            return int(j)
+    return None
+
+
 def margin_hardness_scores(dists: np.ndarray, neigh: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """
-    For each point i:
-      d_same = distance to nearest same-label neighbor
-      d_diff = distance to nearest different-label neighbor
-      score = d_diff - d_same  (smaller => closer to boundary / harder)
-    If either neighbor type not found, score = +inf (not boundary-like).
-    """
     n = y.shape[0]
     scores = np.full(n, np.inf, dtype=np.float32)
 
@@ -98,16 +106,62 @@ def margin_hardness_scores(dists: np.ndarray, neigh: np.ndarray, y: np.ndarray) 
     return scores
 
 
+def margin_hardness_scores_pair(
+    dists: np.ndarray,
+    neigh: np.ndarray,
+    y: np.ndarray,
+    allowed_label_strs: set[str],
+) -> np.ndarray:
+    n = y.shape[0]
+    y_str = y.astype(str)
+    scores = np.full(n, np.inf, dtype=np.float32)
+
+    for i in range(n):
+        yi_str = y_str[i]
+        if yi_str not in allowed_label_strs:
+            continue
+        d_same = None
+        d_diff = None
+        for dist, j in zip(dists[i], neigh[i]):
+            if j == i:
+                continue
+            yj_str = y_str[j]
+            if yj_str not in allowed_label_strs:
+                continue
+            if yj_str == yi_str and d_same is None:
+                d_same = float(dist)
+            if yj_str != yi_str and d_diff is None:
+                d_diff = float(dist)
+            if d_same is not None and d_diff is not None:
+                break
+        if d_same is not None and d_diff is not None:
+            scores[i] = d_diff - d_same
+    return scores
+
+
 def pick_boundary_candidates(X: np.ndarray, y: np.ndarray, metric: str, boundary_k: int):
-    """
-    Strong boundary candidate selection using margin hardness.
-    Returns indices sorted from most boundary-like (smallest margin) to least.
-    """
     dists, neigh = build_knn(X, metric=metric, k=boundary_k)
     scores = margin_hardness_scores(dists, neigh, y)
-    order = np.argsort(scores)  # smallest margin first
-    # filter out inf scores
+    order = np.argsort(scores)
     order = order[np.isfinite(scores[order])]
+    return order, dists, neigh, scores
+
+
+def pick_boundary_candidates_pair(
+    X: np.ndarray,
+    y: np.ndarray,
+    metric: str,
+    boundary_k: int,
+    allowed_label_strs: set[str],
+):
+    dists, neigh = build_knn(X, metric=metric, k=boundary_k)
+    scores = margin_hardness_scores_pair(dists, neigh, y, allowed_label_strs)
+    order = np.argsort(scores)
+    finite = np.isfinite(scores[order])
+    order = order[finite]
+    y_str = y.astype(str)
+    in_pair = np.isin(y_str[order], list(allowed_label_strs))
+    order = order[in_pair]
     return order, dists, neigh, scores
 
 
@@ -121,18 +175,24 @@ def apply_point_flip(y_new: np.ndarray, i: int, new_label, changed_mask: np.ndar
         return False
     y_new[i] = new_label
     changed_mask[i] = True
-    log_rows.append(
-        dict(index=i, original_label=old, new_label=new_label, reason=reason)
-    )
+    log_rows.append(dict(index=i, original_label=old, new_label=new_label, reason=reason))
     return True
 
 
+def resolve_pair_labels(pair_classes: tuple[str, str], y: np.ndarray):
+    y_unique = list(pd.unique(y))
+    str_to_value = {str(v): v for v in y_unique}
+    missing = [p for p in pair_classes if p not in str_to_value]
+    if missing:
+        sample = ", ".join(list(str_to_value.keys())[:20])
+        raise ValueError(
+            f"--pair-classes contains unknown label(s): {', '.join(missing)}. "
+            f"Available labels look like: {sample}"
+        )
+    return str_to_value[pair_classes[0]], str_to_value[pair_classes[1]]
+
+
 def inject_random_exact(X, y, noise_level, random_seed):
-    """
-    Exact budget random label flips:
-      - select random points
-      - assign each a random label (uniform) that is different from its current label
-    """
     n = len(y)
     target = target_num_changes(n, noise_level)
     rng = np.random.RandomState(random_seed)
@@ -164,15 +224,11 @@ def inject_random_exact(X, y, noise_level, random_seed):
 
 
 def inject_nn_exact(X, y, metric, noise_level, random_seed, nn_k):
-    """
-    Exact budget NN: select points (random order) and flip each to its nearest DIFFERENT-label neighbor.
-    """
     n = len(y)
     target = target_num_changes(n, noise_level)
     rng = np.random.RandomState(random_seed)
 
-    # KNN once
-    dists, neigh = build_knn(X, metric=metric, k=nn_k)
+    _, neigh = build_knn(X, metric=metric, k=nn_k)
 
     indices = np.arange(n)
     rng.shuffle(indices)
@@ -196,12 +252,6 @@ def inject_nn_exact(X, y, metric, noise_level, random_seed, nn_k):
 
 
 def inject_border_exact(X, y, metric, noise_level, random_seed, boundary_k, nn_k, boundary_top_frac):
-    """
-    Exact budget boundary nearest:
-      - compute boundary candidates by margin hardness (d_diff - d_same), smaller is more boundary-like
-      - restrict to top boundary_top_frac of candidates
-      - flip those points to their nearest DIFFERENT-label neighbor
-    """
     n = len(y)
     target = target_num_changes(n, noise_level)
     rng = np.random.RandomState(random_seed)
@@ -248,20 +298,79 @@ def inject_border_exact(X, y, metric, noise_level, random_seed, boundary_k, nn_k
     return y_new, log_rows
 
 
+def inject_border_pair_exact(
+    X,
+    y,
+    metric,
+    noise_level,
+    random_seed,
+    boundary_k,
+    nn_k,
+    boundary_top_frac,
+    pair_classes,
+):
+    class_a, class_b = resolve_pair_labels(pair_classes, y)
+    allowed_strs = {str(class_a), str(class_b)}
+
+    y_str = y.astype(str)
+    pair_idx = np.where(np.isin(y_str, list(allowed_strs)))[0]
+    if len(pair_idx) < 2:
+        raise ValueError("Need at least 2 points in --pair-classes for border_pair mode.")
+
+    target = target_num_changes(len(pair_idx), noise_level)
+    rng = np.random.RandomState(random_seed)
+
+    order, _, _, _ = pick_boundary_candidates_pair(
+        X, y, metric=metric, boundary_k=boundary_k, allowed_label_strs=allowed_strs
+    )
+
+    _, neigh = build_knn(X, metric=metric, k=nn_k)
+    y_new = y.copy()
+    changed = np.zeros(len(y), dtype=bool)
+    log_rows = []
+
+    if len(order) == 0:
+        boundary_pool = np.array([], dtype=int)
+    else:
+        top_n = max(1, int(np.floor(boundary_top_frac * len(order))))
+        boundary_pool = order[:top_n].copy()
+        rng.shuffle(boundary_pool)
+
+    changes = 0
+    for i in boundary_pool:
+        if changes >= target:
+            break
+        j = nearest_diff_neighbor_in_allowed_set(neigh[i], y_new, i, allowed_strs)
+        if j is None:
+            continue
+        new_label = choose_flip_label_from_neighbor(y_new, j)
+        if apply_point_flip(y_new, i, new_label, changed, log_rows, reason="border_pair"):
+            changes += 1
+
+    if changes < target:
+        fill_idx = pair_idx.copy()
+        rng.shuffle(fill_idx)
+        for i in fill_idx:
+            if changes >= target:
+                break
+            if changed[i]:
+                continue
+            j = nearest_diff_neighbor_in_allowed_set(neigh[i], y_new, i, allowed_strs)
+            if j is None:
+                continue
+            new_label = choose_flip_label_from_neighbor(y_new, j)
+            if apply_point_flip(y_new, i, new_label, changed, log_rows, reason="border_pair_fill_nn"):
+                changes += 1
+
+    return y_new, log_rows, len(pair_idx), target
+
+
 def inject_cluster_exact(X, y, metric, noise_level, random_seed, cluster_size, nn_k):
-    """
-    Exact budget cluster:
-      - pick random seed points (not yet changed)
-      - for each seed, define a local cluster as its nearest neighbors (including itself)
-      - flip as many points in that cluster as needed to hit the exact target
-      - each cluster uses a single target label (nearest different-label neighbor of the seed)
-    """
     n = len(y)
     target = target_num_changes(n, noise_level)
     rng = np.random.RandomState(random_seed)
 
-    # KNN for cluster membership + diff-label target
-    dists, neigh = build_knn(X, metric=metric, k=max(nn_k, cluster_size + 5))
+    _, neigh = build_knn(X, metric=metric, k=max(nn_k, cluster_size + 5))
 
     y_new = y.copy()
     changed = np.zeros(n, dtype=bool)
@@ -277,20 +386,17 @@ def inject_cluster_exact(X, y, metric, noise_level, random_seed, cluster_size, n
         if changed[seed]:
             continue
 
-        # Choose a single target label for this cluster (from seed's nearest diff-label neighbor)
         seed_nn = nearest_diff_neighbor(neigh[seed], y_new, seed)
         if seed_nn is None:
             continue
         cluster_target = choose_flip_label_from_neighbor(y_new, seed_nn)
 
-        # cluster members: closest cluster_size points (include seed)
         members = []
         for j in neigh[seed]:
             if len(members) >= cluster_size:
                 break
             members.append(int(j))
 
-        # Attempt flips within the cluster until budget met
         for i in members:
             if changes >= target:
                 break
@@ -300,6 +406,82 @@ def inject_cluster_exact(X, y, metric, noise_level, random_seed, cluster_size, n
                 changes += 1
 
     return y_new, log_rows
+
+
+def inject_cluster_pair_exact(
+    X,
+    y,
+    metric,
+    noise_level,
+    random_seed,
+    cluster_size,
+    nn_k,
+    pair_classes,
+):
+    class_a, class_b = resolve_pair_labels(pair_classes, y)
+    allowed_strs = {str(class_a), str(class_b)}
+
+    y_str = y.astype(str)
+    pair_idx = np.where(np.isin(y_str, list(allowed_strs)))[0]
+    if len(pair_idx) < 2:
+        raise ValueError("Need at least 2 points in --pair-classes for cluster_pair mode.")
+
+    target = target_num_changes(len(pair_idx), noise_level)
+    rng = np.random.RandomState(random_seed)
+
+    _, neigh = build_knn(X, metric=metric, k=max(nn_k, cluster_size + 5))
+
+    y_new = y.copy()
+    changed = np.zeros(len(y), dtype=bool)
+    log_rows = []
+
+    seed_order = pair_idx.copy()
+    rng.shuffle(seed_order)
+
+    changes = 0
+    for seed in seed_order:
+        if changes >= target:
+            break
+        if changed[seed]:
+            continue
+
+        seed_nn = nearest_diff_neighbor_in_allowed_set(neigh[seed], y_new, seed, allowed_strs)
+        if seed_nn is None:
+            continue
+        cluster_target = choose_flip_label_from_neighbor(y_new, seed_nn)
+
+        members = []
+        for j in neigh[seed]:
+            if len(members) >= cluster_size:
+                break
+            if str(y_new[j]) not in allowed_strs:
+                continue
+            members.append(int(j))
+
+        for i in members:
+            if changes >= target:
+                break
+            if changed[i]:
+                continue
+            if apply_point_flip(y_new, i, cluster_target, changed, log_rows, reason=f"cluster_pair_seed_{seed}"):
+                changes += 1
+
+    if changes < target:
+        fill_idx = pair_idx.copy()
+        rng.shuffle(fill_idx)
+        for i in fill_idx:
+            if changes >= target:
+                break
+            if changed[i]:
+                continue
+            j = nearest_diff_neighbor_in_allowed_set(neigh[i], y_new, i, allowed_strs)
+            if j is None:
+                continue
+            new_label = choose_flip_label_from_neighbor(y_new, j)
+            if apply_point_flip(y_new, i, new_label, changed, log_rows, reason="cluster_pair_fill_nn"):
+                changes += 1
+
+    return y_new, log_rows, len(pair_idx), target
 
 
 def main():
@@ -312,8 +494,7 @@ def main():
     ap.add_argument("--output-labels", type=str, required=True)
     ap.add_argument("--log-file", type=str, required=True)
 
-    ap.add_argument("--mode", type=str, required=True,
-                    choices=["random", "border", "cluster"])
+    ap.add_argument("--mode", type=str, required=True, choices=["random", "border", "border_pair", "cluster", "cluster_pair"])
     ap.add_argument("--noise-level", type=float, required=True)
 
     ap.add_argument("--metric", type=str, default="cosine")
@@ -322,19 +503,38 @@ def main():
     ap.add_argument("--cluster-size", type=int, default=1)
     ap.add_argument("--nn-k", type=int, default=50, help="K for neighbor search (diff-label selection)")
     ap.add_argument("--boundary-k", type=int, default=25, help="K for boundary hardness scoring")
-    ap.add_argument("--boundary-top-frac", type=float, default=0.25,
-                    help="Use top fraction of boundary candidates as seeds (smaller => more boundary focused)")
+    ap.add_argument(
+        "--boundary-top-frac",
+        type=float,
+        default=0.25,
+        help="Use top fraction of boundary candidates as seeds (smaller => more boundary focused)",
+    )
+    ap.add_argument(
+        "--pair-classes",
+        nargs=2,
+        default=[],
+        metavar=("CLASS_A", "CLASS_B"),
+        help="For mode=border_pair/cluster_pair: two class labels to constrain flips (e.g. --pair-classes 2 39).",
+    )
 
     args = ap.parse_args()
 
     if "--random-seed" not in sys.argv:
-        print('[noise_injection] warning: --random-seed not provided; using default ' + f"{args.random_seed}. Results are seed-dependent.")
+        print(
+            "[noise_injection] warning: --random-seed not provided; "
+            + f"using default {args.random_seed}. Results are seed-dependent."
+        )
 
-    require_embeddings = args.mode in ("border", "cluster")
+    require_embeddings = args.mode in ("border", "border_pair", "cluster", "cluster_pair")
     if require_embeddings and not args.embeddings:
-        raise ValueError("--embeddings is required for border/cluster modes.")
+        raise ValueError("--embeddings is required for border/border_pair/cluster/cluster_pair modes.")
+
     X, df, ids, y = load_inputs(
-        args.embeddings, args.labels, args.id_column, args.label_column, require_embeddings=require_embeddings
+        args.embeddings,
+        args.labels,
+        args.id_column,
+        args.label_column,
+        require_embeddings=require_embeddings,
     )
 
     if args.cluster_size < 1:
@@ -345,17 +545,25 @@ def main():
         raise ValueError("boundary-k must be >= 2")
     if not (0 < args.boundary_top_frac <= 1.0):
         raise ValueError("boundary-top-frac must be in (0,1]")
+    if args.mode in ("border_pair", "cluster_pair") and len(args.pair_classes) != 2:
+        raise ValueError("mode=border_pair/cluster_pair requires --pair-classes CLASS_A CLASS_B")
 
-    # Run selected injection
+    summary_target = None
+
     if args.mode == "random":
-        y_new, log_rows = inject_random_exact(
-            X, y, noise_level=args.noise_level, random_seed=args.random_seed
-        )
+        y_new, log_rows = inject_random_exact(X, y, noise_level=args.noise_level, random_seed=args.random_seed)
+        summary_target = target_num_changes(len(y), args.noise_level)
+
     elif args.mode == "border":
         y_new, log_rows = inject_border_exact(
-            X, y, metric=args.metric, noise_level=args.noise_level,
-            random_seed=args.random_seed, boundary_k=args.boundary_k,
-            nn_k=args.nn_k, boundary_top_frac=args.boundary_top_frac
+            X,
+            y,
+            metric=args.metric,
+            noise_level=args.noise_level,
+            random_seed=args.random_seed,
+            boundary_k=args.boundary_k,
+            nn_k=args.nn_k,
+            boundary_top_frac=args.boundary_top_frac,
         )
         border_count = sum(1 for r in log_rows if r.get("reason") == "border")
         fill_count = sum(1 for r in log_rows if r.get("reason") == "border_fill_nn")
@@ -363,29 +571,78 @@ def main():
         print(f"[noise_injection] fill flips:        {fill_count}")
         if fill_count > 0:
             print("[noise_injection] warning: fill flips were needed to reach target.")
+        summary_target = target_num_changes(len(y), args.noise_level)
+
+    elif args.mode == "border_pair":
+        y_new, log_rows, pair_n, pair_target = inject_border_pair_exact(
+            X,
+            y,
+            metric=args.metric,
+            noise_level=args.noise_level,
+            random_seed=args.random_seed,
+            boundary_k=args.boundary_k,
+            nn_k=args.nn_k,
+            boundary_top_frac=args.boundary_top_frac,
+            pair_classes=(args.pair_classes[0], args.pair_classes[1]),
+        )
+        border_count = sum(1 for r in log_rows if r.get("reason") == "border_pair")
+        fill_count = sum(1 for r in log_rows if r.get("reason") == "border_pair_fill_nn")
+        print(f"[noise_injection] pair classes:      {args.pair_classes[0]}, {args.pair_classes[1]}")
+        print(f"[noise_injection] pair candidate N:  {pair_n}")
+        print(f"[noise_injection] border pair flips: {border_count}")
+        print(f"[noise_injection] fill flips:        {fill_count}")
+        if fill_count > 0:
+            print("[noise_injection] warning: pair fill flips were needed to reach target.")
+        summary_target = pair_target
+
     elif args.mode == "cluster":
         y_new, log_rows = inject_cluster_exact(
-            X, y, metric=args.metric, noise_level=args.noise_level,
-            random_seed=args.random_seed, cluster_size=args.cluster_size, nn_k=args.nn_k
+            X,
+            y,
+            metric=args.metric,
+            noise_level=args.noise_level,
+            random_seed=args.random_seed,
+            cluster_size=args.cluster_size,
+            nn_k=args.nn_k,
         )
+        summary_target = target_num_changes(len(y), args.noise_level)
+
+    elif args.mode == "cluster_pair":
+        y_new, log_rows, pair_n, pair_target = inject_cluster_pair_exact(
+            X,
+            y,
+            metric=args.metric,
+            noise_level=args.noise_level,
+            random_seed=args.random_seed,
+            cluster_size=args.cluster_size,
+            nn_k=args.nn_k,
+            pair_classes=(args.pair_classes[0], args.pair_classes[1]),
+        )
+        seeded_count = sum(1 for r in log_rows if str(r.get("reason", "")).startswith("cluster_pair_seed_"))
+        fill_count = sum(1 for r in log_rows if r.get("reason") == "cluster_pair_fill_nn")
+        print(f"[noise_injection] pair classes:        {args.pair_classes[0]}, {args.pair_classes[1]}")
+        print(f"[noise_injection] pair candidate N:    {pair_n}")
+        print(f"[noise_injection] cluster pair flips:  {seeded_count}")
+        print(f"[noise_injection] fill flips:          {fill_count}")
+        if fill_count > 0:
+            print("[noise_injection] warning: pair fill flips were needed to reach target.")
+        summary_target = pair_target
+
     else:
         raise ValueError(f"Unsupported mode: {args.mode}")
 
-    # Write output labels CSV: preserve all original columns, only replace label column
     out_df = df.copy()
     out_df[args.label_column] = y_new
     out_df.to_csv(args.output_labels, index=False)
 
-    # Write log
     log_df = pd.DataFrame(log_rows)
     log_df.to_csv(args.log_file, index=False)
 
-    # Print summary
-    changed = (y_new != y)
+    changed = y_new != y
     n_changed = int(changed.sum())
-    target = target_num_changes(len(y), args.noise_level)
+
     print(f"[noise_injection] mode={args.mode}")
-    print(f"[noise_injection] target_changes={target} actual_changes={n_changed} (N={len(y)})")
+    print(f"[noise_injection] target_changes={summary_target} actual_changes={n_changed} (N={len(y)})")
     print(f"[noise_injection] wrote labels: {args.output_labels}")
     print(f"[noise_injection] wrote log:    {args.log_file}")
 
