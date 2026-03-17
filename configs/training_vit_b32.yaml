@@ -1,0 +1,29 @@
+# Training defaults (COCO single-label cropped-object setup).
+
+dataset_name: "detection-datasets/coco"
+train_split: "train"
+val_split: "val"
+noisy_labels_csv: ""
+
+model_name: "vit_base_patch32_224"
+num_classes: 80
+img_size: 224
+
+epochs: 30
+batch_size: 64
+lr: 0.00005
+weight_decay: 0.01
+label_smoothing: 0.1
+
+train_target: 118000
+val_target: 5000
+shuffle_buffer: 10000
+seed: 42
+
+checkpoint_dir: "PATH_TO_CHECKPOINT_DIR"
+checkpoint_prefix: "vit_b32_coco"
+
+use_wandb: false
+wandb_entity: ""
+wandb_project: "visual_layer_capstone"
+wandb_run_name: ""

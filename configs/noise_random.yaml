@@ -1,0 +1,21 @@
+# Noise generation defaults.
+
+labels: "PATH_TO_CLEAN_LABELS_CSV"
+embeddings: "PATH_TO_EMBEDDINGS_NPY"
+label_column: "label"
+id_column: "vector_id"
+noise_level: 0.10
+random_seed: 42
+metric: "cosine"
+boundary_k: 25
+boundary_top_frac: 0.25
+nn_k: 50
+cluster_size: 50
+
+outputs:
+  random_labels: "PATH_TO_RANDOM_NOISY_LABELS_CSV"
+  random_log: "PATH_TO_RANDOM_LOG_CSV"
+  border_labels: "PATH_TO_BORDER_NOISY_LABELS_CSV"
+  border_log: "PATH_TO_BORDER_LOG_CSV"
+  cluster_labels: "PATH_TO_CLUSTER_NOISY_LABELS_CSV"
+  cluster_log: "PATH_TO_CLUSTER_LOG_CSV"

@@ -1,0 +1,72 @@
+# End-to-end pipeline definition consumed by run_pipeline.py
+
+stages:
+  - name: pack_embeddings
+    enabled: false
+    module: visual_layer_capstone.embeddings.export_embeddings
+    args:
+      - metadata-to-npy
+      - --metadata-csv
+      - PATH_TO_METADATA_CSV
+      - --embeddings-dir
+      - PATH_TO_EMBEDDINGS_DIR
+      - --out-npy
+      - PATH_TO_OUTPUT_EMBEDDINGS_NPY
+      - --out-labels
+      - PATH_TO_OUTPUT_LABELS_CSV
+
+  - name: random_noise_10
+    enabled: false
+    module: visual_layer_capstone.noise.random_noise
+    args:
+      - --labels
+      - PATH_TO_OUTPUT_LABELS_CSV
+      - --output-labels
+      - PATH_TO_RANDOM_NOISY_LABELS_CSV
+      - --log-file
+      - PATH_TO_RANDOM_LOG_CSV
+      - --noise-level
+      - "0.10"
+
+  - name: border_noise_10
+    enabled: false
+    module: visual_layer_capstone.noise.border_noise
+    args:
+      - --embeddings
+      - PATH_TO_OUTPUT_EMBEDDINGS_NPY
+      - --labels
+      - PATH_TO_OUTPUT_LABELS_CSV
+      - --output-labels
+      - PATH_TO_BORDER_NOISY_LABELS_CSV
+      - --log-file
+      - PATH_TO_BORDER_LOG_CSV
+      - --noise-level
+      - "0.10"
+
+  - name: cluster_noise_10
+    enabled: false
+    module: visual_layer_capstone.noise.cluster_noise
+    args:
+      - --embeddings
+      - PATH_TO_OUTPUT_EMBEDDINGS_NPY
+      - --labels
+      - PATH_TO_OUTPUT_LABELS_CSV
+      - --output-labels
+      - PATH_TO_CLUSTER_NOISY_LABELS_CSV
+      - --log-file
+      - PATH_TO_CLUSTER_LOG_CSV
+      - --noise-level
+      - "0.10"
+      - --cluster-size
+      - "50"
+
+  - name: train_vit_b32
+    enabled: false
+    module: visual_layer_capstone.training.train_imagenet_vit
+    args:
+      - --dataset-name
+      - detection-datasets/coco
+      - --noisy-labels-csv
+      - PATH_TO_CLUSTER_NOISY_LABELS_CSV
+      - --epochs
+      - "30"

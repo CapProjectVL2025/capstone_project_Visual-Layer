@@ -1,215 +1,166 @@
-# CMPSC189 - Visual Layer
+# Visual Layer Capstone: Reproducible Noise Pipeline
 
-**Team Members:**  
-- Alec Song  
-- Rushil Gupta
-- Kushagra Kanaujia
-- Saeed Arellano
-- Bhavya Ranjan
+This repository contains the finalized, reproducible code for UCSB CMPSC 189A-B (Visual Layer team).
 
-## Overview
+Users recreate data and outputs locally by providing their own paths.
 
-This project explores how *structured label noise* affects model performance on large-scale vision datasets.  
+## Project Goal
+The project studies how **dataset label noise structure** affects vision model behavior.
 
-## Project Summary
-This repo focuses on an embedding-driven noise pipeline:
+Instead of only random label corruption, this codebase supports:
+- random flips,
+- **border-aware** flips near class boundaries in embedding space,
+- **cluster-aware** flips that corrupt local neighborhoods coherently.
 
-1. Build a clean label table aligned with embeddings.
-2. Inject controlled noise into labels using one of several modes.
-3. Visualize and inspect where the noisy labels land in t-SNE space.
-4. Feed noisy labels into downstream training/evaluation pipelines.
+The final workflow also includes:
+- ImageNet metadata cleaning with policy-based pruning,
+- embedding generation/packing,
+- noise visualization,
+- streamed COCO ViT training with optional noisy-label overrides.
 
-## Data Model (Important)
-In this workflow, each row is typically an **object-level embedding** (not necessarily one row per image).
+## Repository Structure
 
-- `embeddings.npy`: shape `[N, D]`
-- clean labels CSV: `N` rows with at least:
-  - `vector_id` (or your chosen id column)
-  - `label`
-- row `i` in labels must correspond to row `i` in embeddings.
+```text
+.
+├── README.md
+├── LICENSE
+├── requirements.txt
+├── configs/
+├── src/
+│   └── visual_layer_capstone/
+│       ├── scraping/
+│       ├── cleaning/
+│       ├── embeddings/
+│       ├── noise/
+│       ├── visualization/
+│       ├── training/
+│       └── pipeline/
+├── scripts/
+└── docs/
+```
 
-`noise_injection.py` validates this row alignment for embedding-based modes.
+`src/visual_layer_capstone` is organized as an implicit namespace package (no `__init__.py` files).
 
-## Noise Injection Script
-Script: `alec/scripts/noise_injection.py`
-
-### Supported modes
-- `random`: randomly picks points and flips each to a random different class.
-- `border`: prioritizes boundary-like points (small margin between nearest same-class and nearest different-class neighbors), then fills from global pool if needed.
-- `cluster`: picks seed points and flips local neighbor clusters to a **single target label per seed**.
-
-### Outputs
-- `--output-labels`: noisy label CSV (same columns as input labels, label column replaced)
-- `--log-file`: per-change log CSV with `index`, `original_label`, `new_label`, `reason`
-
-For `border` mode:
-- `reason=border` means changed from boundary pool
-- `reason=border_fill_nn` means changed during fill phase
-- runtime prints counts for both
-
-## Environment
-Install dependencies (example):
+## Environment Setup
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install numpy pandas scikit-learn matplotlib torch datasets tqdm
+pip install -r requirements.txt
+export PYTHONPATH="$PWD/src:$PYTHONPATH"
 ```
 
-## Quick Start
-Run from `alec/` so relative paths stay simple:
+## Stage-by-Stage Reproduction
+
+### 1) (Optional) Export from Visual Layer
+Requires environment credentials:
+- `VL_API_KEY`
+- `VL_API_SECRET`
+- `VL_BASE_URL` (optional)
+- `VL_DATASET_ID`
 
 ```bash
-cd /Users/alecsong/School/capstone/capstone_project_Visual-Layer/alec
-mkdir -p labels logs plots
+./scripts/run_scraping.sh
 ```
 
-### 1) Optional: build `embeddings.npy` + clean labels from metadata
+### 2) Clean and analyze ImageNet metadata
+Core module:
+`python -m visual_layer_capstone.cleaning.apply_clusters_to_imagenet`
 
+Example:
 ```bash
-python3 scripts/export_embeddings_npy.py \
-  --metadata-csv /Users/alecsong/School/capstone/metadata/embeddings.csv \
-  --embeddings-dir /Users/alecsong/School/capstone/embeddings \
-  --out-npy embeddings.npy \
-  --out-labels labels/labels_clean.csv \
-  --max-rows 0
+python -m visual_layer_capstone.cleaning.apply_clusters_to_imagenet from-filtered-json \
+  --partition-mode cluster \
+  --cluster-input-dir PATH_TO_VL_EXPORTS \
+  --policy configs/imagenet_cleaning_policy.yaml \
+  --output-root PATH_TO_CLEANING_OUTPUT_ROOT \
+  --mode metadata-only
 ```
 
-`--max-rows 0` means no cap (use all available rows).
-
-### 2) (Optional) create a faster 10k subset for debugging
-
+Then analyze:
 ```bash
-python3 - <<'PY'
-import numpy as np, pandas as pd
-X = np.load('embeddings.npy')
-df = pd.read_csv('labels/labels_clean.csv')
-rng = np.random.RandomState(42)
-idx = np.sort(rng.choice(len(df), size=10000, replace=False))
-np.save('embeddings_10k.npy', X[idx])
-df.iloc[idx].reset_index(drop=True).to_csv('labels/labels_clean_10k.csv', index=False)
-print('wrote embeddings_10k.npy and labels/labels_clean_10k.csv')
-PY
+python -m visual_layer_capstone.cleaning.apply_clusters_to_imagenet analyze-cleaning-run \
+  --run-dir PATH_TO_CLEANING_RUN_DIR
 ```
 
-## Generate Noisy Labels
-
-### Example: random / border / cluster at 10%
-
+### 3) Pack embeddings + aligned labels
 ```bash
-python3 scripts/noise_injection.py \
-  --labels labels/labels_clean.csv \
-  --output-labels labels/coco_labels_random_10.csv \
-  --log-file logs/coco_log_random_10.csv \
-  --mode random \
-  --noise-level 0.10 \
-  --random-seed 42
-
-python3 scripts/noise_injection.py \
-  --embeddings embeddings.npy \
-  --labels labels/labels_clean.csv \
-  --output-labels labels/coco_labels_border_10.csv \
-  --log-file logs/coco_log_border_10.csv \
-  --mode border \
-  --noise-level 0.10 \
-  --boundary-k 25 \
-  --boundary-top-frac 0.25 \
-  --nn-k 50 \
-  --metric cosine \
-  --random-seed 42
-
-python3 scripts/noise_injection.py \
-  --embeddings embeddings.npy \
-  --labels labels/labels_clean.csv \
-  --output-labels labels/coco_labels_cluster_10.csv \
-  --log-file logs/coco_log_cluster_10.csv \
-  --mode cluster \
-  --noise-level 0.10 \
-  --cluster-size 50 \
-  --nn-k 50 \
-  --metric cosine \
-  --random-seed 42
+./scripts/run_embeddings.sh
 ```
 
-### Example: generate 5%, 15%, 30% for `cluster` and `border`
+`run_embeddings.sh` accepts path overrides via environment variables:
+- `METADATA_CSV`
+- `EMBEDDINGS_DIR`
+- `OUT_NPY`
+- `OUT_LABELS`
 
+Default local outputs used by scripts/modules (all user-overridable):
+- metadata CSV: `metadata/embeddings.csv`
+- embedding vectors: `embeddings/`
+- packed array: `embeddings.npy`
+- clean labels: `labels_clean.csv`
+- noisy labels/logs: `noise/`
+- training checkpoints: `checkpoints/`
+- plots: `plots/`
+
+Or directly:
 ```bash
-for p in 05 15 30; do
-  lv="0.${p}"
-
-  python3 scripts/noise_injection.py \
-    --embeddings embeddings.npy \
-    --labels labels/labels_clean.csv \
-    --output-labels "labels/coco_labels_cluster_${p}.csv" \
-    --log-file "logs/coco_log_cluster_${p}.csv" \
-    --mode cluster \
-    --noise-level "$lv" \
-    --cluster-size 50 \
-    --nn-k 50 \
-    --metric cosine \
-    --random-seed 42
-
-  python3 scripts/noise_injection.py \
-    --embeddings embeddings.npy \
-    --labels labels/labels_clean.csv \
-    --output-labels "labels/coco_labels_border_${p}.csv" \
-    --log-file "logs/coco_log_border_${p}.csv" \
-    --mode border \
-    --noise-level "$lv" \
-    --boundary-k 25 \
-    --boundary-top-frac 0.25 \
-    --nn-k 50 \
-    --metric cosine \
-    --random-seed 42
-
-done
+python -m visual_layer_capstone.embeddings.export_embeddings metadata-to-npy \
+  --metadata-csv PATH_TO_EMBEDDING_METADATA_CSV \
+  --embeddings-dir PATH_TO_EMBEDDING_PT_DIR \
+  --out-npy PATH_TO_OUTPUT_EMBEDDINGS_NPY \
+  --out-labels PATH_TO_OUTPUT_LABELS_CSV
 ```
 
-## Visualizing Noise
-
-### A) Cluster coherence diagnostic
-
+### 4) Generate noise variants
 ```bash
-python3 scripts/viz_issue_cluster_incoherence.py \
-  --embeddings embeddings_10k.npy \
-  --labels labels/labels_clean_10k.csv \
-  --log logs/coco_log_cluster_10.csv \
-  --out plots/issue_cluster_incoherence.png
+./scripts/run_noise_variants.sh
 ```
 
-What this shows:
-- gray = background points
-- colored = changed points
-- color = `new_label`
-- coherent clusters should tend to be one color per local cluster
+`run_noise_variants.sh` accepts path overrides via environment variables:
+- `CLEAN_LABELS`
+- `EMBEDDINGS_NPY`
+- `NOISE_DIR`
 
-### B) Pairwise clean vs noisy t-SNE view
-Use `viz_tsne_mislabels.py` with clean labels plus one or more noisy CSVs:
-
+### 5) Visualize clean vs noisy labels
 ```bash
-python3 scripts/viz_tsne_mislabels.py \
-  --embeddings embeddings_10k.npy \
-  --labels-clean labels/labels_clean_10k.csv \
-  --classes 2 39 \
-  --noisy-random labels/coco_labels_random_10.csv \
-  --noisy-border labels/coco_labels_border_10.csv \
-  --noisy-cluster labels/coco_labels_cluster_10.csv \
-  --out-dir plots
+python -m visual_layer_capstone.visualization.noise_viz \
+  --embeddings PATH_TO_EMBEDDINGS_NPY \
+  --labels-clean PATH_TO_CLEAN_LABELS_CSV \
+  --noisy-random PATH_TO_RANDOM_NOISY_LABELS_CSV \
+  --noisy-border PATH_TO_BORDER_NOISY_LABELS_CSV \
+  --noisy-cluster PATH_TO_CLUSTER_NOISY_LABELS_CSV \
+  --log-random PATH_TO_RANDOM_LOG_CSV \
+  --log-border PATH_TO_BORDER_LOG_CSV \
+  --log-cluster PATH_TO_CLUSTER_LOG_CSV \
+  --out-dir PATH_TO_PLOTS_DIR
 ```
 
-It writes one image per provided noise type, each with:
-- left: clean labels
-- right: corrupted labels
-- `X` markers on changed points
+### 6) Train ViT with noisy labels
+```bash
+./scripts/run_training.sh
+```
 
-## Practical Notes
-- `random` mode does not require embeddings.
-- `border` and `cluster` require embeddings and are much heavier at full dataset scale.
-- For fast iteration, use the 10k subset.
-- For full-size runs, prefer a high-memory VM.
+Override paths:
+```bash
+NOISY_LABELS=PATH_TO_NOISY_LABELS_CSV ./scripts/run_training.sh
+CHECKPOINT_DIR=PATH_TO_CHECKPOINT_DIR ./scripts/run_training.sh
+```
 
-## Troubleshooting
-- Row mismatch error: your labels CSV and embeddings matrix are not aligned.
-- Missing label/id columns: pass `--label-column` and `--id-column` explicitly.
-- Slow runtime: reduce dataset size first (`embeddings_10k.npy`) and tune `nn-k`, `boundary-k`, `cluster-size`.
+### 7) Run full configured pipeline
+```bash
+python -m visual_layer_capstone.pipeline.run_pipeline --config configs/pipeline.yaml
+```
 
+Enable stages by setting `enabled: true` in `configs/pipeline.yaml`.
+
+## Key Configs
+- `configs/imagenet_scrape.yaml`: Visual Layer export defaults.
+- `configs/imagenet_cleaning_policy.yaml`: primary ImageNet policy used in cleaning runs.
+- `configs/imagenet_cleaning_policy_conservative.yaml`: stricter cleaning policy variant for sensitivity checks.
+- `configs/embeddings.yaml`: embedding extraction + pack settings.
+- `configs/noise_random.yaml`: shared noise defaults and output paths.
+- `configs/training_vit_b32.yaml`: baseline training hyperparameters.
+- `configs/pipeline.yaml`: orchestrated stage list.
+
+All config path fields are placeholders (`PATH_TO_...`) and should be replaced per environment.

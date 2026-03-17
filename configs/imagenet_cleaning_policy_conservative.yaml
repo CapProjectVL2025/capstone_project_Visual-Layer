@@ -1,0 +1,101 @@
+policy_version: '1.0'
+policy_name: imagenet_1k_aggressive_clean_conservative
+dataset: ImageNet-1K Training Set
+created_by: Research Team
+date_created: '2026-01-26'
+description: "Aggressive cleaning policy for creating a high-quality ImageNet-1K baseline.\n\
+  \nThis policy removes:\n  \u2022 Near-duplicate images (low uniqueness scores)\n\
+  \  \u2022 Cluster duplicates (keeps best example per visual similarity cluster)\n\
+  \  \u2022 Confirmed mislabels (ML-detected with high confidence)\n  \u2022 Visual\
+  \ and label outliers\n  \u2022 Low-quality images (blur, darkness, corruption)\n\
+  \nIntended use:\n  \u2022 Training robust models on clean data\n  \u2022 Establishing\
+  \ clean baselines for noise injection studies\n  \u2022 Comparing performance on\
+  \ clean vs noisy datasets\n\nExpected outcomes:\n  \u2022 ~950,000 retained images\
+  \ (74% of original)\n  \u2022 ~330,000 removed images (26% of original)\n  \u2022\
+  \ Significantly improved label accuracy\n  \u2022 Reduced visual redundancy\n"
+uniqueness_threshold: 0.2
+dedupe_by_cluster: false
+drop_issues:
+- issue_type: mislabel
+  min_confidence: 0.9
+  description: Image content does not match assigned class label
+  priority: critical
+  expected_removal: ~5-8% of dataset
+  notes: 'Mislabeled data significantly harms model performance.
+
+    At 0.7 confidence, we balance precision/recall for mislabel detection.
+
+    Higher confidence (0.8+) would miss some mislabels.
+
+    Lower confidence (0.6) would remove correct labels.
+
+    '
+- issue_type: label_outlier
+  min_confidence: 0.9
+  description: Outlier within assigned class (edge case or borderline)
+  priority: high
+  expected_removal: ~3-5% of dataset
+  notes: 'Label outliers are technically correct but unusual examples.
+
+    Examples: extreme angles, partial views, unusual contexts.
+
+    Higher threshold (0.8) to avoid removing valid variations.
+
+    '
+- issue_type: visual_outlier
+  min_confidence: 0.9
+  description: Anomalous image in the entire dataset
+  priority: medium
+  expected_removal: ~2-4% of dataset
+  notes: "Visual outliers may indicate:\n  \u2022 Corrupted downloads\n  \u2022 Wrong\
+    \ image format conversions\n  \u2022 Placeholder/error images from web scraping\n"
+- issue_type: blurry
+  min_confidence: 0.9
+  description: Image is significantly blurred or out of focus
+  priority: medium
+  expected_removal: ~2-3% of dataset
+  notes: 'Motion blur, defocus, or low-resolution upscaling.
+
+    High threshold (0.8) because slight blur may be acceptable.
+
+    '
+- issue_type: dark
+  min_confidence: 0.9
+  description: Image is too dark (underexposed)
+  priority: medium
+  expected_removal: ~1-2% of dataset
+  notes: 'Severe underexposure where visual features are unclear.
+
+    Very high threshold (0.85) to avoid removing intentionally dark scenes.
+
+    '
+- issue_type: overexposed
+  min_confidence: 0.9
+  description: Image is too bright (overexposed)
+  priority: medium
+  expected_removal: ~1-2% of dataset
+  notes: 'Severe overexposure with blown-out highlights.
+
+    Very high threshold (0.85) to avoid removing bright scenes.
+
+    '
+- issue_type: corrupted
+  min_confidence: 0.5
+  description: File corruption or unreadable image data
+  priority: critical
+  expected_removal: ~0.5-1% of dataset
+  notes: "Lower threshold (0.5) acceptable because:\n  \u2022 Corrupted files should\
+    \ always be removed\n  \u2022 Even partially corrupted images harm training\n\
+    \  \u2022 False positives are rare for this issue type\n"
+drop_tags:
+- incorrect_label
+- mislabeled
+- delete
+- remove
+- poor_quality
+- bad_example
+- suspicious
+- test_image
+- duplicate
+- wrong_class
+analysis_variant: conservative

@@ -1,0 +1,10 @@
+# Visual Layer export configuration.
+# Credentials are read from environment variables (VL_API_KEY, VL_API_SECRET, VL_BASE_URL).
+
+dataset_id: "<REPLACE_WITH_DATASET_ID>"
+format: "json"
+include_images: false
+file_name: "imagenet_export.zip"
+output_zip: "PATH_TO_EXPORT_ZIP"
+poll_interval: 30
+max_wait: 7200

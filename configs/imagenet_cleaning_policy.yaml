@@ -1,0 +1,314 @@
+# ============================================================================
+# ImageNet-1K Dataset Cleaning Policy
+# ============================================================================
+# 
+# Purpose: Create high-quality baseline for noise robustness experiments
+# Dataset: ImageNet-1K Training Set (1,281,167 images, 1,000 classes)
+# Method: Visual Layer automated analysis + policy-based filtering
+# Expected Removal: 20-30% of images
+# 
+# Author: Research Team
+# Date: January 2026
+# Version: 1.0
+# 
+# Reference:
+#   Visual Layer Documentation: https://docs.visual-layer.com
+#   Paper: [Your paper title and link]
+# ============================================================================
+
+# Metadata
+policy_version: '1.0'
+policy_name: 'imagenet_1k_aggressive_clean'
+dataset: 'ImageNet-1K Training Set'
+created_by: 'Research Team'
+date_created: '2026-01-26'
+
+# Description
+description: |
+  Aggressive cleaning policy for creating a high-quality ImageNet-1K baseline.
+  
+  This policy removes:
+    • Near-duplicate images (low uniqueness scores)
+    • Cluster duplicates (keeps best example per visual similarity cluster)
+    • Confirmed mislabels (ML-detected with high confidence)
+    • Visual and label outliers
+    • Low-quality images (blur, darkness, corruption)
+  
+  Intended use:
+    • Training robust models on clean data
+    • Establishing clean baselines for noise injection studies
+    • Comparing performance on clean vs noisy datasets
+  
+  Expected outcomes:
+    • ~950,000 retained images (74% of original)
+    • ~330,000 removed images (26% of original)
+    • Significantly improved label accuracy
+    • Reduced visual redundancy
+
+# ============================================================================
+# UNIQUENESS FILTERING
+# ============================================================================
+# 
+# Visual Layer's uniqueness_score measures visual distinctiveness (0-1 scale).
+# Lower scores indicate near-duplicates or highly similar images.
+# 
+# Threshold guidance:
+#   0.1-0.2: Very conservative (removes ~2-5% of dataset)
+#   0.2-0.3: Conservative (removes ~5-15%)
+#   0.3-0.4: Aggressive (removes ~15-25%) ← Recommended for research
+#   0.4-0.5: Very aggressive (removes ~25-35%)
+#   0.5+:    Extremely aggressive (removes ~35-50%)
+# 
+# For ImageNet-1K, we use 0.3 to balance:
+#   • Removing obvious near-duplicates
+#   • Preserving legitimate visual variations
+#   • Maintaining sufficient training data
+
+uniqueness_threshold: 0.3
+
+# ============================================================================
+# CLUSTER-BASED DEDUPLICATION
+# ============================================================================
+# 
+# Visual Layer groups visually similar images into clusters using learned
+# embeddings and hierarchical clustering. When enabled, this keeps only
+# the highest-uniqueness image per cluster.
+# 
+# Use cases:
+#   • Remove near-duplicates from web scraping
+#   • Eliminate minor variations (crops, color adjustments)
+#   • Keep one representative example per visual concept
+# 
+# Trade-offs:
+#   ✓ Significantly reduces visual redundancy
+#   ✓ Improves training efficiency
+#   ✗ May remove legitimate variations (different angles, lighting)
+# 
+# For ImageNet-1K: Enabled
+#   Rationale: ImageNet has known duplicate issues from web sourcing
+
+dedupe_by_cluster: true
+
+# ============================================================================
+# VISUAL LAYER ISSUE DETECTION
+# ============================================================================
+# 
+# Visual Layer uses ML models to detect quality issues in each image.
+# Each issue has a confidence score (0-1) indicating detection certainty.
+# 
+# Only images meeting BOTH criteria are removed:
+#   1. Has the specified issue_type
+#   2. confidence >= min_confidence threshold
+# 
+# Confidence threshold guidance:
+#   0.5-0.6: Aggressive (may have false positives)
+#   0.7-0.8: Balanced (recommended for research)
+#   0.9+:    Conservative (only very confident detections)
+
+drop_issues:
+  # ========================================================================
+  # MISLABELS (Critical)
+  # ========================================================================
+  # Images that don't match their assigned class label.
+  # Visual Layer uses multi-model ensemble for mislabel detection.
+  
+  - issue_type: 'mislabel'
+    min_confidence: 0.7
+    description: 'Image content does not match assigned class label'
+    priority: 'critical'
+    expected_removal: '~5-8% of dataset'
+    notes: |
+      Mislabeled data significantly harms model performance.
+      At 0.7 confidence, we balance precision/recall for mislabel detection.
+      Higher confidence (0.8+) would miss some mislabels.
+      Lower confidence (0.6) would remove correct labels.
+  
+  # ========================================================================
+  # LABEL OUTLIERS (High Priority)
+  # ========================================================================
+  # Images that are atypical examples of their class.
+  # May be borderline cases, unusual perspectives, or edge cases.
+  
+  - issue_type: 'label_outlier'
+    min_confidence: 0.8
+    description: 'Outlier within assigned class (edge case or borderline)'
+    priority: 'high'
+    expected_removal: '~3-5% of dataset'
+    notes: |
+      Label outliers are technically correct but unusual examples.
+      Examples: extreme angles, partial views, unusual contexts.
+      Higher threshold (0.8) to avoid removing valid variations.
+  
+  # ========================================================================
+  # VISUAL OUTLIERS (Medium Priority)
+  # ========================================================================
+  # Images that are anomalous across the entire dataset.
+  # Often indicate data collection errors or corrupted files.
+  
+  - issue_type: 'visual_outlier'
+    min_confidence: 0.75
+    description: 'Anomalous image in the entire dataset'
+    priority: 'medium'
+    expected_removal: '~2-4% of dataset'
+    notes: |
+      Visual outliers may indicate:
+        • Corrupted downloads
+        • Wrong image format conversions
+        • Placeholder/error images from web scraping
+  
+  # ========================================================================
+  # IMAGE QUALITY ISSUES
+  # ========================================================================
+  # Technical quality problems that may affect model training.
+  
+  - issue_type: 'blurry'
+    min_confidence: 0.8
+    description: 'Image is significantly blurred or out of focus'
+    priority: 'medium'
+    expected_removal: '~2-3% of dataset'
+    notes: |
+      Motion blur, defocus, or low-resolution upscaling.
+      High threshold (0.8) because slight blur may be acceptable.
+  
+  - issue_type: 'dark'
+    min_confidence: 0.85
+    description: 'Image is too dark (underexposed)'
+    priority: 'medium'
+    expected_removal: '~1-2% of dataset'
+    notes: |
+      Severe underexposure where visual features are unclear.
+      Very high threshold (0.85) to avoid removing intentionally dark scenes.
+  
+  - issue_type: 'overexposed'
+    min_confidence: 0.85
+    description: 'Image is too bright (overexposed)'
+    priority: 'medium'
+    expected_removal: '~1-2% of dataset'
+    notes: |
+      Severe overexposure with blown-out highlights.
+      Very high threshold (0.85) to avoid removing bright scenes.
+  
+  - issue_type: 'corrupted'
+    min_confidence: 0.5
+    description: 'File corruption or unreadable image data'
+    priority: 'critical'
+    expected_removal: '~0.5-1% of dataset'
+    notes: |
+      Lower threshold (0.5) acceptable because:
+        • Corrupted files should always be removed
+        • Even partially corrupted images harm training
+        • False positives are rare for this issue type
+
+# ============================================================================
+# USER TAG FILTERING
+# ============================================================================
+# 
+# Manual tags applied through Visual Layer UI or API.
+# Any image with ANY of these tags will be removed.
+# 
+# Use for:
+#   • Manual quality control results
+#   • Flagging issues found during spot-checking
+#   • Dataset-specific problems not caught by automated detection
+
+drop_tags:
+  - 'incorrect_label'      # Manual mislabel confirmation
+  - 'mislabeled'           # Alternative mislabel tag
+  - 'delete'               # Marked for removal
+  - 'remove'               # Alternative deletion tag
+  - 'poor_quality'         # Subjective quality issues
+  - 'bad_example'          # Not representative of class
+  - 'suspicious'           # Needs review but probably bad
+  - 'test_image'           # Test/placeholder images
+  - 'duplicate'            # Manual duplicate identification
+  - 'wrong_class'          # Clear class assignment error
+
+# ============================================================================
+# SUMMARY STATISTICS (Expected)
+# ============================================================================
+# 
+# Based on this policy applied to ImageNet-1K Training Set:
+# 
+# Original Dataset:        1,281,167 images (100%)
+# Expected Clean Dataset:    ~950,000 images (~74%)
+# Expected Removed:          ~330,000 images (~26%)
+# 
+# Removal Breakdown:
+#   • Uniqueness < 0.3:       ~15% (192,000 images)
+#   • Cluster duplicates:      ~8% (102,000 images)
+#   • Mislabels:               ~6% ( 77,000 images)
+#   • Label outliers:          ~4% ( 51,000 images)
+#   • Visual outliers:         ~3% ( 38,000 images)
+#   • Quality issues:          ~3% ( 38,000 images)
+#   • User tags:              ~1% ( 13,000 images)
+# 
+# Note: Images can fail multiple criteria (overlap), so percentages
+# don't sum to 26%. The 26% is deduplicated removals.
+# 
+# Quality Metrics (Expected):
+#   • Label accuracy improvement: +5-8%
+#   • Uniqueness score mean: 0.45 → 0.62
+#   • Visual diversity (cluster count): ~85,000 → ~78,000
+#   • Reduced training time: ~15-20% (fewer redundant examples)
+
+# ============================================================================
+# USAGE INSTRUCTIONS
+# ============================================================================
+# 
+# Apply this policy:
+#   python clean_imagenet.py \
+#       --dataset-id YOUR_DATASET_ID \
+#       --policy cleaning_policy.yaml \
+#       --output ./data \
+#       --export ./clean_dataset_export
+# 
+# Modify policy:
+#   1. Edit thresholds above
+#   2. Save this file
+#   3. Re-run cleaning script
+#   4. Compare results
+# 
+# Version control:
+#   • Keep this file in git
+#   • Tag versions: git tag cleaning-policy-v1.0
+#   • Document changes in commit messages
+# 
+# Alternative policies:
+#   • Conservative: uniqueness_threshold: 0.2, min_confidence: 0.9
+#   • Very aggressive: uniqueness_threshold: 0.4, min_confidence: 0.6
+#   • Quality-only: dedupe_by_cluster: false, focus on issues
+# 
+# Reproducibility:
+#   • This file + Visual Layer dataset ID = deterministic cleaning
+#   • Include in supplementary materials for papers
+#   • Share with collaborators for consistent results
+
+# ============================================================================
+# VALIDATION CHECKLIST
+# ============================================================================
+# 
+# Before using cleaned dataset:
+#   ☐ Review cleaning_summary.json for expected removal rates
+#   ☐ Inspect drop_metadata.parquet to verify reasonable removals
+#   ☐ Spot-check random kept images for quality
+#   ☐ Verify label distribution hasn't become severely imbalanced
+#   ☐ Test trained model performance on clean validation set
+#   ☐ Compare to baseline trained on original dataset
+#   ☐ Document cleaning policy and results in paper/report
+
+# ============================================================================
+# CITATION
+# ============================================================================
+# 
+# If using this cleaning methodology in research, please cite:
+# 
+# @inproceedings{your_paper_2026,
+#   title={Dataset Cleaning for Robust Computer Vision},
+#   author={Your Name and Collaborators},
+#   booktitle={Conference},
+#   year={2026}
+# }
+# 
+# And acknowledge:
+#   "Dataset cleaning performed using Visual Layer (visual-layer.com)
+#    with custom policy-based filtering."

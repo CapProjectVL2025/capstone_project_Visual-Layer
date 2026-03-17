@@ -1,0 +1,18 @@
+# Embedding generation + packing configuration.
+
+extract_coco_clip:
+  dataset_name: "detection-datasets/coco"
+  split: "train"
+  model_name: "sentence-transformers/clip-ViT-B-32"
+  embeddings_dir: "PATH_TO_EMBEDDINGS_DIR"
+  metadata_csv: "PATH_TO_METADATA_CSV"
+  metadata_json: "PATH_TO_METADATA_JSON"
+  streaming: true
+  max_samples: 0
+
+metadata_to_npy:
+  metadata_csv: "PATH_TO_METADATA_CSV"
+  embeddings_dir: "PATH_TO_EMBEDDINGS_DIR"
+  out_npy: "PATH_TO_OUTPUT_EMBEDDINGS_NPY"
+  out_labels: "PATH_TO_OUTPUT_LABELS_CSV"
+  max_rows: 0
