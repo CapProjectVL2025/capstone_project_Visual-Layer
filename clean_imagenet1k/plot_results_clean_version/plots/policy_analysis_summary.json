@@ -1,0 +1,527 @@
+{
+  "timestamp": "2026-03-11T13:24:05.379045",
+  "run_dir": "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups",
+  "analysis_output_dir": "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis",
+  "policy_name": "imagenet_1k_aggressive_clean_conservative",
+  "total_images": 1331167,
+  "kept": 1064267,
+  "dropped": 266900,
+  "drop_rate": 0.20050076361568459,
+  "consistency_checks": {
+    "summary_total_matches_prune_rows": true,
+    "summary_kept_matches_prune_rows": true,
+    "summary_dropped_matches_prune_rows": true
+  },
+  "drop_bucket_counts": {
+    "likely_redundant": 266233,
+    "quality_related": 413,
+    "review_atypical": 368,
+    "likely_harmful": 1
+  },
+  "multi_reason_breakdown": {
+    "single_reason": 266785,
+    "two_reasons": 115,
+    "three_or_more_reasons": 0
+  },
+  "top_drop_reasons": [
+    {
+      "reason": "low_uniqueness<0.2",
+      "count": 266233,
+      "reason_bucket": "likely_redundant",
+      "share_of_total": 0.19999969951178176,
+      "share_of_dropped": 0.9975009366804046
+    },
+    {
+      "reason": "issue_dark",
+      "count": 413,
+      "reason_bucket": "quality_related",
+      "share_of_total": 0.000310254085325132,
+      "share_of_dropped": 0.0015473960284750842
+    },
+    {
+      "reason": "issue_visual_outlier",
+      "count": 368,
+      "reason_bucket": "review_atypical",
+      "share_of_total": 0.0002764491607739675,
+      "share_of_dropped": 0.0013787935556388161
+    },
+    {
+      "reason": "issue_mislabel",
+      "count": 1,
+      "reason_bucket": "likely_harmful",
+      "share_of_total": 7.512205455814335e-07,
+      "share_of_dropped": 3.746721618583739e-06
+    }
+  ],
+  "top_reason_pairs": [
+    {
+      "reason_a": "issue_dark",
+      "reason_b": "low_uniqueness<0.2",
+      "shared_count": 87,
+      "jaccard": 0.00032638177664231935
+    },
+    {
+      "reason_a": "issue_visual_outlier",
+      "reason_b": "low_uniqueness<0.2",
+      "shared_count": 28,
+      "jaccard": 0.00010503689420909094
+    }
+  ],
+  "top_reason_combinations": [
+    {
+      "reason_combo": "low_uniqueness<0.2",
+      "count": 266118,
+      "reason_count": 1
+    },
+    {
+      "reason_combo": "issue_visual_outlier",
+      "count": 340,
+      "reason_count": 1
+    },
+    {
+      "reason_combo": "issue_dark",
+      "count": 326,
+      "reason_count": 1
+    },
+    {
+      "reason_combo": "issue_dark | low_uniqueness<0.2",
+      "count": 87,
+      "reason_count": 2
+    },
+    {
+      "reason_combo": "issue_visual_outlier | low_uniqueness<0.2",
+      "count": 28,
+      "reason_count": 2
+    },
+    {
+      "reason_combo": "issue_mislabel",
+      "count": 1,
+      "reason_count": 1
+    }
+  ],
+  "top_over_pruned_classes": [
+    {
+      "label": "garden_spider",
+      "drop_fraction": 0.45555555555555555,
+      "dropped_images": 615,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "great_grey_owl",
+      "drop_fraction": 0.44814814814814813,
+      "dropped_images": 605,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "odometer",
+      "drop_fraction": 0.42962962962962964,
+      "dropped_images": 580,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "black_and_gold_garden_spider",
+      "drop_fraction": 0.4266666666666667,
+      "dropped_images": 576,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "scuba_diver",
+      "drop_fraction": 0.42074074074074075,
+      "dropped_images": 568,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "cabbage_butterfly",
+      "drop_fraction": 0.42,
+      "dropped_images": 567,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "jacamar",
+      "drop_fraction": 0.4192592592592593,
+      "dropped_images": 566,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "leopard",
+      "drop_fraction": 0.4162962962962963,
+      "dropped_images": 562,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "damselfly",
+      "drop_fraction": 0.41333333333333333,
+      "dropped_images": 558,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "giant_panda",
+      "drop_fraction": 0.4074074074074074,
+      "dropped_images": 550,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "agaric",
+      "drop_fraction": 0.4059259259259259,
+      "dropped_images": 548,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "monarch",
+      "drop_fraction": 0.4051851851851852,
+      "dropped_images": 547,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "sidewinder",
+      "drop_fraction": 0.40444444444444444,
+      "dropped_images": 546,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "bald_eagle",
+      "drop_fraction": 0.40074074074074073,
+      "dropped_images": 541,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "tiger_shark",
+      "drop_fraction": 0.40074074074074073,
+      "dropped_images": 541,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "box_turtle",
+      "drop_fraction": 0.3985185185185185,
+      "dropped_images": 538,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "flamingo",
+      "drop_fraction": 0.3985185185185185,
+      "dropped_images": 538,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "wolf_spider",
+      "drop_fraction": 0.39555555555555555,
+      "dropped_images": 534,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "tiger_beetle",
+      "drop_fraction": 0.39185185185185184,
+      "dropped_images": 529,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "tree_frog",
+      "drop_fraction": 0.39185185185185184,
+      "dropped_images": 529,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_flag": true,
+      "over_pruned_severity": "high"
+    }
+  ],
+  "flagged_over_pruned_classes": [
+    {
+      "label": "garden_spider",
+      "drop_fraction": 0.45555555555555555,
+      "dropped_images": 615,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "great_grey_owl",
+      "drop_fraction": 0.44814814814814813,
+      "dropped_images": 605,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "odometer",
+      "drop_fraction": 0.42962962962962964,
+      "dropped_images": 580,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "black_and_gold_garden_spider",
+      "drop_fraction": 0.4266666666666667,
+      "dropped_images": 576,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "scuba_diver",
+      "drop_fraction": 0.42074074074074075,
+      "dropped_images": 568,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "cabbage_butterfly",
+      "drop_fraction": 0.42,
+      "dropped_images": 567,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "jacamar",
+      "drop_fraction": 0.4192592592592593,
+      "dropped_images": 566,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "leopard",
+      "drop_fraction": 0.4162962962962963,
+      "dropped_images": 562,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "damselfly",
+      "drop_fraction": 0.41333333333333333,
+      "dropped_images": 558,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "giant_panda",
+      "drop_fraction": 0.4074074074074074,
+      "dropped_images": 550,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "agaric",
+      "drop_fraction": 0.4059259259259259,
+      "dropped_images": 548,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "monarch",
+      "drop_fraction": 0.4051851851851852,
+      "dropped_images": 547,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "sidewinder",
+      "drop_fraction": 0.40444444444444444,
+      "dropped_images": 546,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "bald_eagle",
+      "drop_fraction": 0.40074074074074073,
+      "dropped_images": 541,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "tiger_shark",
+      "drop_fraction": 0.40074074074074073,
+      "dropped_images": 541,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "box_turtle",
+      "drop_fraction": 0.3985185185185185,
+      "dropped_images": 538,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "flamingo",
+      "drop_fraction": 0.3985185185185185,
+      "dropped_images": 538,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "wolf_spider",
+      "drop_fraction": 0.39555555555555555,
+      "dropped_images": 534,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "tiger_beetle",
+      "drop_fraction": 0.39185185185185184,
+      "dropped_images": 529,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    },
+    {
+      "label": "tree_frog",
+      "drop_fraction": 0.39185185185185184,
+      "dropped_images": 529,
+      "top_drop_reason": "low_uniqueness<0.2",
+      "over_pruned_severity": "high"
+    }
+  ],
+  "artifacts": {
+    "drop_reason_counts_csv": "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/drop_reason_counts.csv",
+    "drop_reason_overlap_csv": "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/drop_reason_overlap.csv",
+    "drop_reason_combinations_csv": "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/drop_reason_combinations.csv",
+    "class_impact_csv": "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/class_impact.csv",
+    "uniqueness_by_decision_csv": "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/uniqueness_by_decision.csv",
+    "issue_confidence_by_decision_csv": "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/issue_confidence_by_decision.csv",
+    "issue_types_by_label_csv": "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/issue_types_by_label.csv",
+    "plots": [
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/drop_reason_counts.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/drop_reason_overlap_heatmap.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/uniqueness_kept_vs_dropped.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/top_classes_by_drop_fraction.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_top_dropped_classes.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_001.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_002.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_003.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_004.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_005.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_006.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_007.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_008.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_009.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_010.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_011.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_012.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_013.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_014.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_015.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_016.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_017.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_018.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_019.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_020.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_021.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_022.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_023.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_024.png",
+      "/Users/saeedarellano/visual_layer/capstone_project_Visual-Layer/data/imagenet1k_vl_policy_sweep_no_cluster/clean_imagenet1k_vl_no_cluster_imagenet_1k_aggressive_clean_conservative_groups/analysis/plots/issue_types_by_label_pages/issue_types_by_label_page_025.png"
+    ]
+  },
+  "policy_snapshot": {
+    "policy_version": "1.0",
+    "policy_name": "imagenet_1k_aggressive_clean_conservative",
+    "uniqueness_threshold": 0.2,
+    "dedupe_by_cluster": false,
+    "drop_issues": [
+      {
+        "issue_type": "mislabel",
+        "min_confidence": 0.9,
+        "description": "Image content does not match assigned class label",
+        "priority": "critical",
+        "expected_removal": "~5-8% of dataset",
+        "notes": "Mislabeled data significantly harms model performance.\nAt 0.7 confidence, we balance precision/recall for mislabel detection.\nHigher confidence (0.8+) would miss some mislabels.\nLower confidence (0.6) would remove correct labels.\n"
+      },
+      {
+        "issue_type": "label_outlier",
+        "min_confidence": 0.9,
+        "description": "Outlier within assigned class (edge case or borderline)",
+        "priority": "high",
+        "expected_removal": "~3-5% of dataset",
+        "notes": "Label outliers are technically correct but unusual examples.\nExamples: extreme angles, partial views, unusual contexts.\nHigher threshold (0.8) to avoid removing valid variations.\n"
+      },
+      {
+        "issue_type": "visual_outlier",
+        "min_confidence": 0.9,
+        "description": "Anomalous image in the entire dataset",
+        "priority": "medium",
+        "expected_removal": "~2-4% of dataset",
+        "notes": "Visual outliers may indicate:\n  \u2022 Corrupted downloads\n  \u2022 Wrong image format conversions\n  \u2022 Placeholder/error images from web scraping\n"
+      },
+      {
+        "issue_type": "blurry",
+        "min_confidence": 0.9,
+        "description": "Image is significantly blurred or out of focus",
+        "priority": "medium",
+        "expected_removal": "~2-3% of dataset",
+        "notes": "Motion blur, defocus, or low-resolution upscaling.\nHigh threshold (0.8) because slight blur may be acceptable.\n"
+      },
+      {
+        "issue_type": "dark",
+        "min_confidence": 0.9,
+        "description": "Image is too dark (underexposed)",
+        "priority": "medium",
+        "expected_removal": "~1-2% of dataset",
+        "notes": "Severe underexposure where visual features are unclear.\nVery high threshold (0.85) to avoid removing intentionally dark scenes.\n"
+      },
+      {
+        "issue_type": "overexposed",
+        "min_confidence": 0.9,
+        "description": "Image is too bright (overexposed)",
+        "priority": "medium",
+        "expected_removal": "~1-2% of dataset",
+        "notes": "Severe overexposure with blown-out highlights.\nVery high threshold (0.85) to avoid removing bright scenes.\n"
+      },
+      {
+        "issue_type": "corrupted",
+        "min_confidence": 0.5,
+        "description": "File corruption or unreadable image data",
+        "priority": "critical",
+        "expected_removal": "~0.5-1% of dataset",
+        "notes": "Lower threshold (0.5) acceptable because:\n  \u2022 Corrupted files should always be removed\n  \u2022 Even partially corrupted images harm training\n  \u2022 False positives are rare for this issue type\n"
+      }
+    ],
+    "drop_tags": [
+      "incorrect_label",
+      "mislabeled",
+      "delete",
+      "remove",
+      "poor_quality",
+      "bad_example",
+      "suspicious",
+      "test_image",
+      "duplicate",
+      "wrong_class"
+    ]
+  },
+  "over_pruning_thresholds": {
+    "min_class_size": 50,
+    "min_dropped_images": 10
+  }
+}
