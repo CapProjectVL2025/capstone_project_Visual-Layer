@@ -1,4 +1,0 @@
-# One cluster UUID per line.
-# Copy this file to cluster_ids.txt and replace with your real IDs.
-# Example:
-# 36664ab3-9261-4ec6-a44a-7607f3cf5bf9
